@@ -11,6 +11,7 @@ Este tutorial monta tudo o que o worker precisa para levar pedidos de uma sessã
 7. [Validar em três etapas](#7-validar-em-três-etapas)
 8. [Rodar como serviço](#8-rodar-como-serviço)
 9. [Solução de problemas](#9-solução-de-problemas)
+10. [Rodar em container (Podman ou Docker rootless)](#10-rodar-em-container-podman-ou-docker-rootless)
 
 > **Antes de começar:** alguns pontos ainda não foram comprovados em ambiente real (veja [Limitações](../README.md#limitações-ainda-não-comprovadas)). Por isso o worker vem com `DryRun=true` e a validação da [seção 7](#7-validar-em-três-etapas) é feita em etapas.
 
@@ -29,7 +30,7 @@ Convenções usadas aqui:
 | Conta Microsoft 365 corporativa com Teams e Power Automate | Acesse <https://make.powerautomate.com> e veja se o portal abre sem pedir licença. |
 | App **Workflows** instalado no Teams | No Teams: **Apps** (barra lateral) → pesquise **Workflows** → **Add** (Adicionar) ou **Open** (Abrir). Sem ele, o envio de cartões falha. |
 | Host Linux com o GitHub Copilot Agent Host rodando | `$ code agent host --help` responde e a sessão abre no VS Code. |
-| .NET SDK 10 no host | `$ dotnet --list-sdks` mostra uma versão `10.x`. |
+| .NET SDK 10 no host (dispensável se for usar container) | `$ dotnet --list-sdks` mostra uma versão `10.x`. Para container, veja a [seção 10](#10-rodar-em-container-podman-ou-docker-rootless). |
 | `git`, `curl`, `openssl` e `python3` no host | `$ git --version && curl --version && openssl version && python3 --version` |
 
 Se a sua empresa restringe conectores do Power Automate (políticas de DLP), confirme com o administrador que **Microsoft Teams** e **Request/Response** podem ser usados no mesmo fluxo.
@@ -460,7 +461,191 @@ Use em `<id-do-chat>` o trecho depois de `ahp-chat:/` do URI escolhido na [seç�
 | Cartão não aparece no Teams | App Workflows não instalado, destinatário errado ou fluxo desligado | Confira os [pré-requisitos](#1-pré-requisitos), o campo **Recipient** e se o fluxo está **On** em **My flows**. |
 | Resultado `Forbidden` | Resposta de outra conta ou tenant | Confira `AllowedObjectId`/`AllowedTenantId` ([seção 3.3](#33-anotar-os-ids)). |
 | Resultado `Expired` ou `Duplicate` | Cartão respondido depois do prazo ou mais de uma vez | Ajuste `RequestTimeToLive` e o `Timeout` da [seção 2.3](#23-publicar-o-cartão-e-esperar-a-resposta), mantendo os dois iguais. |
+| Container: `Falha ao listar chats: Arquivo de secret ausente...` ou `Arquivo de secret ausente...` | O UID do processo no container não é o dono dos arquivos montados | Podman: use `--userns=keep-id:uid=1654,gid=1654`. Docker rootless: use `--user 0:0` ([seção 10.4](#usuário-do-processo-no-container)). |
+| Container: `--list-chats` termina com `1`, mas fora do container funciona | O container não enxerga o loopback do host | Podman: confira a porta em `--network=pasta:-T,<porta>`. Docker rootless: veja a [seção 10.6](#106-docker-rootless). |
+| Container: `Permission denied` ao montar volume (RHEL/Fedora) | Rótulo SELinux | Mantenha o sufixo `:Z` nas montagens. |
 | Erro ao salvar a ação **Response** | Resposta assíncrona indisponível nesse gatilho | Registre a mensagem: é uma das [limitações](../README.md#limitações-ainda-não-comprovadas) em validação. |
+
+---
+
+## 10. Rodar em container (Podman ou Docker rootless)
+
+O repositório traz um [`Containerfile`](../Containerfile) que serve tanto ao Podman quanto ao Docker. A imagem roda o mesmo worker das seções anteriores, como **usuário sem privilégios**, e não guarda nenhum segredo nem configuração: tudo é montado na execução, somente leitura. Com container, o host não precisa do .NET SDK.
+
+As seções 2, 3, 5 e 7 continuam valendo. Só mudam a instalação (seção 4), o local da configuração (seção 6) e o serviço (seção 8).
+
+### 10.1 Pré-requisitos
+
+| Item | Como conferir |
+|------|---------------|
+| Podman 4.4 ou mais recente, em modo rootless (recomendado) | `$ podman info --format '{{.Host.Security.Rootless}}'` responde `true`. |
+| **ou** Docker Engine 29.5 ou mais recente, em modo rootless | `$ docker info --format '{{.SecurityOptions}}'` contém `name=rootless`. Versões anteriores: veja a [seção 10.6](#106-docker-rootless). |
+| Agent Host com **porta e token fixos** | [Seção 5.2](#52-opção-recomendada-porta-e-token-fixos). Com porta variável, o comando do container teria de mudar a cada reinício. |
+
+> Os comandos abaixo usam `podman`. Para Docker rootless, troque por `docker` e siga as diferenças da [seção 10.6](#106-docker-rootless).
+
+### 10.2 Construir a imagem
+
+```bash
+$ cd ~/src/CopilotTeamsBridge && git pull
+$ podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
+```
+
+O build compila em modo Release dentro do container (`mcr.microsoft.com/dotnet/sdk:10.0`) e gera uma imagem final de cerca de 240 MB baseada em `mcr.microsoft.com/dotnet/aspnet:10.0`. O arquivo [`.dockerignore`](../.dockerignore) impede que `appsettings.Local.json`, `*.key`, `*.token` e `*.bearer` entrem no contexto de build.
+
+Para atualizar depois: `git pull`, repita o `build` e reinicie o serviço (seção 10.5).
+
+### 10.3 Preparar segredos e configuração
+
+A imagem procura os segredos em `/secrets` (as variáveis `TEAMSBRIDGE_TeamsBridge__CorrelationKeyFile` e `TEAMSBRIDGE_TeamsBridge__AgentHost__TokenFile` já apontam para lá) e a configuração em `/app/appsettings.Local.json`. Use o mesmo diretório da [seção 4.2](#42-criar-o-diretório-de-segredos):
+
+```text
+~/.config/copilot-teams-bridge/        (700)
+├── correlation.key                    (600)
+├── agent-host.token                   (600)
+├── workflow.bearer                    (600, só no modo bearer)
+└── appsettings.Local.json             (600)
+```
+
+Crie `~/.config/copilot-teams-bridge/appsettings.Local.json` como na [seção 6](#6-configurar-o-worker), com duas diferenças:
+
+- **Não** informe `CorrelationKeyFile` nem `AgentHost:TokenFile`: as variáveis da imagem têm precedência e apontam para `/secrets`.
+- No modo `bearer`, use `"BearerTokenFile": "/secrets/workflow.bearer"`, que é o caminho **dentro** do container.
+
+```json
+{
+  "TeamsBridge": {
+    "DryRun": true,
+    "AgentHost": {
+      "Endpoint": "ws://127.0.0.1:<porta>/",
+      "ChatChannel": "ahp-chat:/<id-do-chat>"
+    },
+    "Workflow": {
+      "WebhookUrl": "https://<url-do-webhook-copiada-na-secao-2.5>",
+      "AuthMode": "url-secret"
+    },
+    "Responder": {
+      "AllowedObjectId": "<objectId-da-secao-3.3>",
+      "AllowedTenantId": "<tenantId-da-secao-3.3>"
+    }
+  }
+}
+```
+
+```bash
+$ chmod 600 ~/.config/copilot-teams-bridge/appsettings.Local.json
+```
+
+### 10.4 Executar manualmente
+
+Defina a porta fixa do Agent Host numa variável do shell, para não repeti-la:
+
+```bash
+$ PORTA=<porta>
+$ CFG=~/.config/copilot-teams-bridge
+```
+
+**Descobrir o chat** (equivale à [seção 5.4](#54-canal-do-chat)):
+
+```bash
+$ podman run --rm \
+    --network=pasta:-T,$PORTA \
+    --userns=keep-id:uid=1654,gid=1654 \
+    --read-only --cap-drop=all --security-opt=no-new-privileges \
+    -v $CFG:/secrets:ro,Z \
+    -v $CFG/appsettings.Local.json:/app/appsettings.Local.json:ro,Z \
+    localhost/copilot-teams-bridge:latest --list-chats
+```
+
+**Rodar o worker** em primeiro plano (para as etapas da [seção 7](#7-validar-em-três-etapas)): repita o mesmo comando **sem** `--list-chats`. Os logs aparecem no terminal; `Ctrl+C` encerra. Para mudar algo só nesta execução, acrescente argumentos depois do nome da imagem, por exemplo `--TeamsBridge:DryRun=false`.
+
+O que cada opção faz:
+
+| Opção | Motivo |
+|-------|--------|
+| `--network=pasta:-T,$PORTA` | Rede isolada: dentro do container, `127.0.0.1:$PORTA` é encaminhado para a mesma porta no loopback do host. O container não enxerga nenhuma outra porta local, mas continua com saída HTTPS para o webhook. O worker exige endpoint em loopback, e é isso que ele vê. |
+| `--userns=keep-id:uid=1654,gid=1654` | Ver [Usuário do processo no container](#usuário-do-processo-no-container), logo abaixo. |
+| `--read-only`, `--cap-drop=all`, `--security-opt=no-new-privileges` | O worker não grava em disco nem precisa de capabilities. |
+| `-v ...:ro,Z` | Montagens somente leitura. O `Z` aplica o rótulo SELinux exigido em RHEL/Fedora; em distribuições sem SELinux, ele é ignorado. |
+
+Alternativa mais simples, com menos isolamento: `--network=host`. O container passa a usar a rede do host inteira; funciona igual, mas enxerga todas as portas locais.
+
+#### Usuário do processo no container
+
+O worker recusa segredos legíveis por grupo ou outros (`600`). Dentro do container, o arquivo continua pertencendo ao **seu** usuário, então o processo precisa rodar com esse mesmo UID:
+
+- **Podman rootless:** `--userns=keep-id:uid=1654,gid=1654` mapeia o seu UID do host para o usuário `app` (1654) da imagem. O processo roda como `app` no container e como você no host.
+- **Docker rootless:** não há `keep-id`. O seu UID do host aparece como `root` (0) no container, então use `--user 0:0`. Isso **não** dá privilégio no host: o "root" do container rootless é o seu usuário comum.
+
+Sem isso, o processo roda com outro UID, não consegue ler os arquivos e termina com `Arquivo de secret ausente ou com caminho relativo`.
+
+### 10.5 Rodar como serviço com Podman Quadlet
+
+No Podman, o jeito recomendado de manter o container como serviço de usuário é o **Quadlet**: um arquivo `.container` que o systemd converte em unit. Ele substitui a unit da [seção 8](#8-rodar-como-serviço); não use as duas ao mesmo tempo.
+
+Crie `~/.config/containers/systemd/copilot-teams-bridge.container`, trocando `<porta>` pela porta fixa do Agent Host:
+
+```ini
+[Unit]
+Description=CopilotTeamsBridge (container)
+After=copilot-agent-host.service
+
+[Container]
+Image=localhost/copilot-teams-bridge:latest
+ContainerName=copilot-teams-bridge
+Network=pasta:-T,<porta>
+UserNS=keep-id:uid=1654,gid=1654
+ReadOnly=true
+DropCapability=all
+NoNewPrivileges=true
+Volume=%h/.config/copilot-teams-bridge:/secrets:ro,Z
+Volume=%h/.config/copilot-teams-bridge/appsettings.Local.json:/app/appsettings.Local.json:ro,Z
+LogDriver=journald
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+$ /usr/libexec/podman/quadlet -dryrun -user   # confere o arquivo; não deve mostrar erro
+$ systemctl --user daemon-reload
+$ systemctl --user start copilot-teams-bridge.service
+$ journalctl --user -u copilot-teams-bridge -f
+$ loginctl enable-linger "$USER"   # mantém o serviço ativo sem sessão aberta
+```
+
+Observações:
+
+- Units geradas pelo Quadlet não aceitam `systemctl enable`. Quem liga o serviço no boot é a seção `[Install]`, aplicada no `daemon-reload`.
+- **Vários chats:** crie um arquivo `.container` por chat (por exemplo `copilot-teams-bridge-projetoX.container`), cada um com seu `ContainerName` e um `appsettings.Local.json` próprio montado em `/app/appsettings.Local.json`. Também dá para manter um único arquivo de configuração e passar o canal com `Exec=--TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<id>`.
+- Depois de reconstruir a imagem (seção 10.2), rode `systemctl --user restart copilot-teams-bridge.service`.
+
+### 10.6 Docker rootless
+
+O comando é o mesmo da seção 10.4, com três diferenças:
+
+```bash
+$ docker run -d --name copilot-teams-bridge --restart unless-stopped \
+    --network=host \
+    --user 0:0 \
+    --read-only --cap-drop=all --security-opt=no-new-privileges \
+    -v $CFG:/secrets:ro,Z \
+    -v $CFG/appsettings.Local.json:/app/appsettings.Local.json:ro,Z \
+    localhost/copilot-teams-bridge:latest
+$ docker logs -f copilot-teams-bridge
+```
+
+1. **Rede:** Docker não tem o `pasta:-T` do Podman. Use `--network=host`. Até o Docker Engine 29.4, no modo rootless, `--network=host` usava a rede interna do RootlessKit, e não a do host: o worker não alcança o Agent Host em `127.0.0.1` e o `--list-chats` termina com código `1`. Nesse caso, atualize o Docker ou use Podman. **Não** troque o endpoint por um IP que não seja de loopback: o worker recusa, porque o token do Agent Host vai na URL da conexão.
+2. **Usuário:** `--user 0:0`, como explicado em [Usuário do processo no container](#usuário-do-processo-no-container).
+3. **Serviço:** `--restart unless-stopped` religa o container quando o daemon do Docker rootless sobe. Para isso, o daemon precisa iniciar com o usuário: `systemctl --user enable docker` e `loginctl enable-linger "$USER"`.
+
+Antes de deixar o container em segundo plano, confira a conectividade com `docker run --rm ... localhost/copilot-teams-bridge:latest --list-chats` (mesmas opções, sem `-d`, `--name` e `--restart`).
+
+> **Validação:** a imagem e todos os comandos desta seção foram testados com **Podman 5.8 rootless** (rede `pasta` e `host`, `keep-id`, `--user 0:0`, Quadlet). O Docker rootless não foi testado diretamente; o `--user 0:0` foi verificado no Podman, que usa o mesmo mapeamento de UID do Docker rootless.
 
 ---
 

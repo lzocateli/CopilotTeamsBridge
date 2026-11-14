@@ -1,0 +1,13 @@
+# Lido por Docker e Podman. Nunca envie segredos ou configuração local ao contexto de build.
+.git/
+.vs/
+.idea/
+**/bin/
+**/obj/
+**/TestResults/
+**/appsettings.Local.json
+**/*.key
+**/*.token
+**/*.bearer
+test/
+docs/

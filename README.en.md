@@ -119,6 +119,21 @@ UMask=0077
 WantedBy=default.target
 ```
 
+## Container (Podman or rootless Docker)
+
+The [`Containerfile`](Containerfile) builds an image with no secrets that runs as an unprivileged user. Secrets and settings are mounted read-only at `/secrets` and `/app/appsettings.Local.json`. Example with rootless Podman:
+
+```bash
+podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
+podman run --rm --network=pasta:-T,<port> --userns=keep-id:uid=1654,gid=1654 \
+  --read-only --cap-drop=all --security-opt=no-new-privileges \
+  -v ~/.config/copilot-teams-bridge:/secrets:ro,Z \
+  -v ~/.config/copilot-teams-bridge/appsettings.Local.json:/app/appsettings.Local.json:ro,Z \
+  localhost/copilot-teams-bridge:latest --list-chats
+```
+
+Without `--list-chats`, the same command runs the worker. Podman Quadlet service, rootless Docker and network/UID details are in [section 10 of the tutorial (pt-BR)](docs/tutorial-configuracao.md#10-rodar-em-container-podman-ou-docker-rootless).
+
 ## Not yet verified
 
 - Posting to the self-chat (`48:notes`) through the Workflow.
