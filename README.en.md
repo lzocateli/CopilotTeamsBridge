@@ -6,6 +6,8 @@ Standalone .NET 10 worker that forwards confirmation and input requests from a G
 
 It can be used by any project: the worker knows nothing about the source repository, only the configured Agent Host chat channel and webhook.
 
+> **Full walkthrough:** [setup tutorial](docs/tutorial-configuracao.md) (in Portuguese) — Power Automate, Linux host, Agent Host and validation.
+
 ## How it works
 
 1. The worker connects to the local Agent Host (loopback WebSocket), subscribes to the configured `ChatChannel` and waits for requests (`inputRequested`, tool confirmations).

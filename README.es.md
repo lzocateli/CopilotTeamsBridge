@@ -6,6 +6,8 @@ Worker .NET 10 independiente que lleva las solicitudes de confirmación y de ent
 
 Puede usarlo cualquier proyecto: el worker no conoce el repositorio de origen, solo el canal de chat del Agent Host y el webhook configurados.
 
+> **Paso a paso completo:** [tutorial de configuración](docs/tutorial-configuracao.md) (en portugués) — Power Automate, host Linux, Agent Host y validación.
+
 ## Cómo funciona
 
 1. El worker se conecta al Agent Host local (WebSocket en loopback), se suscribe al `ChatChannel` configurado y espera solicitudes (`inputRequested`, confirmaciones de herramientas).
