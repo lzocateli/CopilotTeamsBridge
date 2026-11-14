@@ -1,0 +1,12 @@
+bin/
+obj/
+TestResults/
+*.user
+*.suo
+.vs/
+.idea/
+# Configuracao local com a URL real do webhook e demais valores do ambiente
+appsettings.Local.json
+*.key
+*.token
+*.bearer

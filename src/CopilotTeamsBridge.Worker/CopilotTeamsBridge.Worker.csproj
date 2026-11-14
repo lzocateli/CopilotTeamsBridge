@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <IsPackable>false</IsPackable>
+        <AssemblyName>copilot-teams-bridge</AssemblyName>
+        <RootNamespace>CopilotTeamsBridge.Worker</RootNamespace>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="CopilotTeamsBridge.Worker.Tests" />
+        <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Content Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+        <Content Update="appsettings.Local.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('appsettings.Local.json')" />
+    </ItemGroup>
+</Project>

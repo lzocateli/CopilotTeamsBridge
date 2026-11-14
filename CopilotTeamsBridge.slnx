@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CopilotTeamsBridge.Worker/CopilotTeamsBridge.Worker.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/CopilotTeamsBridge.Worker.Tests/CopilotTeamsBridge.Worker.Tests.csproj" />
+  </Folder>
+</Solution>
