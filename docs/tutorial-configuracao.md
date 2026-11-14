@@ -1,26 +1,23 @@
 # Tutorial: configurar o CopilotTeamsBridge de ponta a ponta
 
-Este tutorial monta tudo o que o worker precisa para levar pedidos de uma sessão do GitHub Copilot (Agent Host) até o Microsoft Teams e trazer a resposta de volta para a **mesma sessão**:
+Este tutorial monta tudo o que o worker precisa para levar pedidos de uma sessão do GitHub Copilot (Agent Host) até o Microsoft Teams e trazer a resposta de volta para a **mesma sessão**. O worker roda em **container Podman rootless**: o host não precisa do .NET SDK, e a imagem não guarda nenhum segredo.
 
 1. [Pré-requisitos](#1-pré-requisitos)
 2. [Criar o Workflow no Power Automate](#2-criar-o-workflow-no-power-automate)
 3. [Testar o Workflow sozinho e descobrir seus IDs](#3-testar-o-workflow-sozinho-e-descobrir-seus-ids)
-4. [Preparar o host Linux](#4-preparar-o-host-linux)
+4. [Construir a imagem e preparar os segredos](#4-construir-a-imagem-e-preparar-os-segredos)
 5. [Conectar ao Agent Host](#5-conectar-ao-agent-host)
-6. [Configurar o worker](#6-configurar-o-worker)
+6. [Configurar o worker e escolher o chat](#6-configurar-o-worker-e-escolher-o-chat)
 7. [Validar em três etapas](#7-validar-em-três-etapas)
-8. [Rodar como serviço](#8-rodar-como-serviço)
+8. [Rodar como serviço com Quadlet](#8-rodar-como-serviço-com-quadlet)
 9. [Solução de problemas](#9-solução-de-problemas)
-10. [Rodar em container (Podman rootless)](#10-rodar-em-container-podman-rootless)
 
 > **Antes de começar:** alguns pontos ainda não foram comprovados em ambiente real (veja [Limitações](../README.md#limitações-ainda-não-comprovadas)). Por isso o worker vem com `DryRun=true` e a validação da [seção 7](#7-validar-em-três-etapas) é feita em etapas.
 
-**Dois modos de execução.** O worker pode rodar como binário .NET no host ou em **container Podman rootless**. As seções 2, 3 e 5.1 a 5.3 são iguais nos dois modos. Onde o procedimento muda, há um bloco **Em container** com o equivalente; os detalhes ficam na [seção 10](#10-rodar-em-container-podman-rootless).
-
 Convenções usadas aqui:
 
-- `<usuario>`, `<porta>` etc. são placeholders. Troque pelos seus valores.
-- Comandos com `$` rodam no host Linux onde está o Agent Host.
+- `<porta>`, `<id-do-chat>` etc. são placeholders. Troque pelos seus valores.
+- Comandos com `$` rodam no host Linux onde está o Agent Host, como o seu usuário comum (nunca com `sudo`).
 - Os nomes de menus estão em inglês, como aparecem no Power Automate. Se a sua interface estiver em português, os nomes equivalentes aparecem entre parênteses.
 
 ---
@@ -32,8 +29,7 @@ Convenções usadas aqui:
 | Conta Microsoft 365 corporativa com Teams e Power Automate | Acesse <https://make.powerautomate.com> e veja se o portal abre sem pedir licença. |
 | App **Workflows** instalado no Teams | No Teams: **Apps** (barra lateral) → pesquise **Workflows** → **Add** (Adicionar) ou **Open** (Abrir). Sem ele, o envio de cartões falha. |
 | Host Linux com o GitHub Copilot Agent Host rodando | `$ code agent host --help` responde e a sessão abre no VS Code. |
-| **Binário:** .NET SDK 10 no host | `$ dotnet --list-sdks` mostra uma versão `10.x`. |
-| **Container:** Podman 4.4 ou mais recente, rootless (dispensa o .NET SDK) | `$ podman --version` e `$ podman info --format '{{.Host.Security.Rootless}}'` responde `true`. |
+| Podman 4.4 ou mais recente, em modo rootless | `$ podman --version` e `$ podman info --format '{{.Host.Security.Rootless}}'` responde `true`. |
 | `git`, `curl`, `openssl` e `python3` no host | `$ git --version && curl --version && openssl version && python3 --version` |
 
 Se a sua empresa restringe conectores do Power Automate (políticas de DLP), confirme com o administrador que **Microsoft Teams** e **Request/Response** podem ser usados no mesmo fluxo.
@@ -127,7 +123,7 @@ Com a resposta assíncrona ligada, o Power Automate responde ao worker na hora c
 
 1. Clique em **Save** (Salvar), no canto superior direito. Corrija os erros que o designer apontar.
 2. Clique de novo no gatilho. O campo **HTTP URL** agora mostra a URL do webhook.
-3. Copie a URL e guarde-a só no host, no arquivo da [seção 6](#6-configurar-o-worker). **Não cole em chat, ticket, commit ou linha de comando.** Ela contém a assinatura `sig=`.
+3. Copie a URL e guarde-a só no host, no arquivo da [seção 6.1](#61-criar-o-appsettingslocaljson). **Não cole em chat, ticket, commit ou linha de comando.** Ela contém a assinatura `sig=`.
 
 O fluxo final fica assim:
 
@@ -211,30 +207,31 @@ $ cd ~ && rm -rf ~/tmp-workflow-test
 
 ---
 
-## 4. Preparar o host Linux
+## 4. Construir a imagem e preparar os segredos
 
-### 4.1 Baixar, testar e publicar
+### 4.1 Construir a imagem
 
 ```bash
 $ git clone https://github.com/lzocateli/CopilotTeamsBridge.git ~/src/CopilotTeamsBridge
 $ cd ~/src/CopilotTeamsBridge
-$ dotnet test CopilotTeamsBridge.slnx
-$ dotnet publish src/CopilotTeamsBridge.Worker -c Release -o ~/apps/copilot-teams-bridge
+$ podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
 ```
 
-O executável publicado fica em `~/apps/copilot-teams-bridge/copilot-teams-bridge.dll`.
+O build compila em modo Release dentro de `mcr.microsoft.com/dotnet/sdk:10.0` e gera uma imagem de cerca de 240 MB baseada em `mcr.microsoft.com/dotnet/aspnet:10.0`. O processo roda como o usuário sem privilégios `app` (UID 1654). O [`.containerignore`](../.containerignore) impede que `appsettings.Local.json`, `*.key`, `*.token` e `*.bearer` entrem no contexto de build.
 
-> **Em container:** clone o repositório da mesma forma, mas troque `dotnet test` e `dotnet publish` pelo build da imagem. Os testes não rodam no build da imagem; se quiser executá-los, use um host com .NET SDK.
->
-> ```bash
-> $ git clone https://github.com/lzocateli/CopilotTeamsBridge.git ~/src/CopilotTeamsBridge
-> $ cd ~/src/CopilotTeamsBridge
-> $ podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
-> ```
->
-> Detalhes na [seção 10.2](#102-construir-a-imagem).
+Para atualizar no futuro: `git pull`, repita o `podman build` e reinicie o serviço ([seção 8](#8-rodar-como-serviço-com-quadlet)).
 
 ### 4.2 Criar o diretório de segredos
+
+Tudo o que é sensível ou específico do seu ambiente fica num único diretório do host, montado **somente leitura** no container:
+
+```text
+~/.config/copilot-teams-bridge/        (700)  →  /secrets no container
+├── correlation.key                    (600)  chave HMAC dos cartões
+├── agent-host.token                   (600)  token do Agent Host (seção 5)
+├── workflow.bearer                    (600)  só no modo bearer
+└── appsettings.Local.json             (600)  →  /app/appsettings.Local.json (seção 6)
+```
 
 ```bash
 $ install -d -m 700 ~/.config/copilot-teams-bridge
@@ -243,15 +240,13 @@ $ openssl rand -base64 32 > ~/.config/copilot-teams-bridge/correlation.key
 $ chmod 600 ~/.config/copilot-teams-bridge/*
 ```
 
-O worker se recusa a ler arquivos de segredo que o grupo ou outros usuários possam ler.
-
-> **Em container:** este diretório é o mesmo. Ele é montado somente leitura em `/secrets`, e o container roda com o seu UID para conseguir ler os arquivos `600` ([seção 10.4](#usuário-do-processo-no-container)).
+O worker se recusa a ler arquivos de segredo que o grupo ou outros usuários possam ler. A imagem já aponta `CorrelationKeyFile` e `AgentHost:TokenFile` para `/secrets/correlation.key` e `/secrets/agent-host.token`; não é preciso configurá-los.
 
 ---
 
 ## 5. Conectar ao Agent Host
 
-O worker precisa de três informações sobre o Agent Host: o **endpoint** (`ws://127.0.0.1:<porta>/`), o **token de conexão** e o **canal do chat** (`ahp-chat:/<id>`).
+O worker precisa de três informações sobre o Agent Host: a **porta** (o endpoint é sempre `ws://127.0.0.1:<porta>/`), o **token de conexão** e o **canal do chat** (este último na [seção 6](#6-configurar-o-worker-e-escolher-o-chat)).
 
 ### 5.1 Onde o Agent Host publica porta e token
 
@@ -265,7 +260,7 @@ O arquivo traz `endpoint.host`, `endpoint.port` e `connectionToken`. Sem `--port
 
 ### 5.2 Opção recomendada: porta e token fixos
 
-Um token e uma porta fixos deixam a configuração do worker estável. Edite o serviço do Agent Host (exemplo para um serviço de usuário systemd):
+A porta fica gravada no comando do container e na unit Quadlet, então ela precisa ser fixa. Edite o serviço do Agent Host (exemplo para um serviço de usuário systemd):
 
 ```bash
 $ openssl rand -hex 32 > ~/.config/copilot-teams-bridge/agent-host.token
@@ -284,10 +279,10 @@ $ systemctl --user restart copilot-agent-host.service
 
 ### 5.3 Alternativa: ler do registro a cada início
 
-Se não puder mexer no serviço, extraia o token para o arquivo e veja só a porta. O comando abaixo usa a entrada `standalone` mais recente e não imprime o token:
+Se não puder mexer no serviço do Agent Host, extraia o token para o arquivo e veja a porta. O comando abaixo usa a entrada `standalone` mais recente e não imprime o token:
 
 ```bash
-$ python3 - <<'EOF'
+$ python3 - <<'PY'
 import glob, json, os
 entries = [json.load(open(f)) for f in glob.glob(os.path.expanduser('~/.config/Code/agent-host/local-endpoint/entries/*.json'))]
 entry = max((e for e in entries if e.get('type') == 'standalone'), key=lambda e: e.get('pid', 0))
@@ -295,22 +290,94 @@ path = os.path.expanduser('~/.config/copilot-teams-bridge/agent-host.token')
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 os.write(fd, entry['connectionToken'].encode()); os.close(fd)
 print('porta:', entry['endpoint']['port'])
-EOF
+PY
 ```
 
-Repita esse passo sempre que o Agent Host reiniciar.
+Sempre que o Agent Host reiniciar, repita o comando e, se a porta mudar, atualize-a em `appsettings.Local.json` ([seção 6.1](#61-criar-o-appsettingslocaljson)), na variável `CTB_PORTA` ([seção 6.2](#62-definir-o-comando-base)) e na unit Quadlet ([seção 8](#8-rodar-como-serviço-com-quadlet)).
 
-> **Em container:** prefira a [seção 5.2](#52-opção-recomendada-porta-e-token-fixos). A porta fica gravada no comando `podman run` e na unit Quadlet (`Network=pasta:-T,<porta>`); com porta variável, esses dois pontos teriam de ser editados a cada reinício do Agent Host. O token é relido do arquivo montado a cada reconexão, então basta repetir o script acima.
+---
 
-### 5.4 Canal do chat
+## 6. Configurar o worker e escolher o chat
 
-O `ChatChannel` identifica a conversa do Copilot que o worker vai acompanhar. Para descobri-lo, rode o worker no modo `--list-chats`. Ele conecta ao Agent Host com o endpoint e o token das seções anteriores, lista as sessões mais recentes (até 20) com seus chats e termina. Nada é enviado ao Teams, e o webhook, a chave de correlação e o `ChatChannel` não precisam estar configurados.
+### 6.1 Criar o `appsettings.Local.json`
+
+**É aqui que fica a URL do webhook.** Crie o arquivo no diretório de segredos:
 
 ```bash
-$ cd ~/apps/copilot-teams-bridge
-$ dotnet copilot-teams-bridge.dll --list-chats \
-    --TeamsBridge:AgentHost:Endpoint=ws://127.0.0.1:<porta>/ \
-    --TeamsBridge:AgentHost:TokenFile=$HOME/.config/copilot-teams-bridge/agent-host.token
+$ umask 077
+$ nano ~/.config/copilot-teams-bridge/appsettings.Local.json
+```
+
+```json
+{
+  "TeamsBridge": {
+    "DryRun": true,
+    "RequestTimeToLive": "00:15:00",
+    "AgentHost": {
+      "Endpoint": "ws://127.0.0.1:<porta>/",
+      "ChatChannel": "ahp-chat:/<id-do-chat-da-secao-6.3>"
+    },
+    "Workflow": {
+      "WebhookUrl": "https://<url-do-webhook-copiada-na-secao-2.5>",
+      "AllowedPollingHosts": [],
+      "AuthMode": "url-secret"
+    },
+    "Responder": {
+      "AllowedObjectId": "<objectId-da-secao-3.3>",
+      "AllowedTenantId": "<tenantId-da-secao-3.3>"
+    }
+  }
+}
+```
+
+```bash
+$ chmod 600 ~/.config/copilot-teams-bridge/appsettings.Local.json
+```
+
+Observações:
+
+- **Caminhos:** dentro do container, o diretório de segredos é `/secrets`. Qualquer caminho de arquivo nesta configuração precisa usar esse prefixo, nunca `/home/...`.
+- **`AllowedPollingHosts`:** se ficar vazio, o worker só segue `Location` no mesmo host da `WebhookUrl`. Se o `Location` da [seção 3.1](#31-disparar-um-cartão-sintético) estiver em outro host, coloque esse hostname aqui (só o hostname, sem caminho). Para ver o host sem expor a URL inteira: `grep -i '^location:' headers.txt | cut -d/ -f3`.
+- **`AuthMode`:** com **Specific users in my tenant**, use `"bearer"` e acrescente `"BearerTokenFile": "/secrets/workflow.bearer"`. O arquivo `~/.config/copilot-teams-bridge/workflow.bearer` (600) precisa ser renovado por um processo externo.
+- **Precedência:** `appsettings.json` da imagem < este arquivo < variáveis `TEAMSBRIDGE_*` da imagem < argumentos depois do nome da imagem (`--TeamsBridge:...`). Veja o [README](../README.md#configuração).
+- A configuração é lida só na partida: depois de editar o arquivo, reinicie o container ou o serviço.
+
+### 6.2 Definir o comando base
+
+Para não repetir as opções do Podman, defina uma função no shell. Ela roda o container em primeiro plano, removido ao terminar, e repassa os argumentos ao worker:
+
+```bash
+$ export CTB_PORTA=<porta>
+$ ctb() {
+    local cfg="$HOME/.config/copilot-teams-bridge"
+    podman run --rm --name copilot-teams-bridge-manual \
+      --network="pasta:-T,${CTB_PORTA:?defina CTB_PORTA}" \
+      --userns=keep-id:uid=1654,gid=1654 \
+      --read-only --cap-drop=all --security-opt=no-new-privileges \
+      -v "$cfg:/secrets:ro,z" \
+      -v "$cfg/appsettings.Local.json:/app/appsettings.Local.json:ro,z" \
+      localhost/copilot-teams-bridge:latest "$@"
+  }
+```
+
+Para tê-la em todo terminal, cole as duas definições no fim do `~/.bashrc`.
+
+O que cada opção faz:
+
+| Opção | Motivo |
+|-------|--------|
+| `--network=pasta:-T,<porta>` | Rede isolada: dentro do container, `127.0.0.1:<porta>` é encaminhado para a mesma porta no loopback do host. O container não enxerga nenhuma outra porta local, mas tem saída HTTPS para o webhook. O worker exige endpoint em loopback, e é isso que ele vê. |
+| `--userns=keep-id:uid=1654,gid=1654` | Mapeia o seu UID do host para o usuário `app` da imagem. Assim o processo consegue ler os arquivos `600`, que pertencem a você, sem nenhum privilégio extra. Sem isso, a leitura falha com `Arquivo de secret ausente ou com caminho relativo`. |
+| `--read-only`, `--cap-drop=all`, `--security-opt=no-new-privileges` | O worker não grava em disco nem precisa de capabilities. |
+| `-v ...:ro,z` | Montagens somente leitura. O `z` aplica o rótulo SELinux compartilhado exigido em RHEL/Fedora, o que permite vários containers (um por chat) lendo o mesmo diretório; em distribuições sem SELinux, ele é ignorado. |
+| `--name copilot-teams-bridge-manual` | Impede duas execuções manuais ao mesmo tempo. |
+
+### 6.3 Descobrir o canal do chat
+
+O `ChatChannel` identifica a conversa do Copilot que o worker vai acompanhar. O modo `--list-chats` conecta ao Agent Host, lista as sessões mais recentes (até 20) com seus chats e termina. Nada é enviado ao Teams.
+
+```bash
+$ ctb --list-chats
 ```
 
 Exemplo de saída (os títulos são os mesmos que aparecem na lista de sessões do VS Code):
@@ -330,92 +397,29 @@ Como escolher:
 
 1. Localize a sessão pelo título que aparece no VS Code.
 2. Copie o URI marcado com `*`. É o chat principal da sessão, onde você conversa com o Copilot. Os demais são chats auxiliares criados por subagentes (por exemplo `Critique pass`).
-3. Use o URI completo em `AgentHost:ChatChannel` na [seção 6](#6-configurar-o-worker).
+3. Cole o URI completo em `AgentHost:ChatChannel` no `appsettings.Local.json` ([seção 6.1](#61-criar-o-appsettingslocaljson)).
 
-Se o endpoint e o token já estiverem em `appsettings.Local.json`, basta `dotnet copilot-teams-bridge.dll --list-chats`.
-
-> **Em container:** o mesmo modo, pela imagem. O token vem de `/secrets/agent-host.token` automaticamente; só a porta é informada:
->
-> ```bash
-> $ PORTA=<porta>; CFG=~/.config/copilot-teams-bridge
-> $ podman run --rm --network=pasta:-T,$PORTA --userns=keep-id:uid=1654,gid=1654 \
->     --read-only --cap-drop=all --security-opt=no-new-privileges \
->     -v $CFG:/secrets:ro,Z \
->     localhost/copilot-teams-bridge:latest --list-chats \
->     --TeamsBridge:AgentHost:Endpoint=ws://127.0.0.1:$PORTA/
-> ```
-
-| Código de saída | Significado |
+| Código de saída (`echo $?`) | Significado |
 |-----------------|-------------|
 | `0` | Chats listados. |
 | `2` | Conexão feita, mas nenhum chat encontrado. Abra ou crie a sessão no VS Code e repita. |
-| `1` | Falha: endpoint fora de `127.0.0.1`/`localhost`, token ausente ou inválido, ou Agent Host inacessível. A mensagem não mostra o token nem a URI. |
+| `1` | Falha: porta errada, endpoint fora de `127.0.0.1`/`localhost`, token ausente ou inválido, ou Agent Host parado. A mensagem não mostra o token nem a URI. |
 
 > Sessões criadas sem chats adicionais podem mostrar o chat padrão no formato `ahp-chat://default/<valor>`. Esse URI também é válido: copie-o inteiro, sem alterar nada.
 
 ---
 
-## 6. Configurar o worker
-
-Crie `~/apps/copilot-teams-bridge/appsettings.Local.json`, no mesmo diretório do binário publicado, com permissão `600`. **É aqui que fica a URL do webhook.**
-
-> **Em container:** o arquivo fica em `~/.config/copilot-teams-bridge/appsettings.Local.json`, sem `CorrelationKeyFile` nem `AgentHost:TokenFile` (a imagem já aponta para `/secrets`) e com `BearerTokenFile` no caminho de dentro do container. Use o modelo da [seção 10.3](#103-preparar-segredos-e-configuração) no lugar do abaixo.
-
-```bash
-$ umask 077
-$ nano ~/apps/copilot-teams-bridge/appsettings.Local.json
-```
-
-```json
-{
-  "TeamsBridge": {
-    "DryRun": true,
-    "CorrelationKeyFile": "/home/<usuario>/.config/copilot-teams-bridge/correlation.key",
-    "RequestTimeToLive": "00:15:00",
-    "AgentHost": {
-      "Endpoint": "ws://127.0.0.1:<porta>/",
-      "TokenFile": "/home/<usuario>/.config/copilot-teams-bridge/agent-host.token",
-      "ChatChannel": "ahp-chat:/<id-do-chat>"
-    },
-    "Workflow": {
-      "WebhookUrl": "https://<url-do-webhook-copiada-na-secao-2.5>",
-      "AllowedPollingHosts": [],
-      "AuthMode": "url-secret",
-      "BearerTokenFile": ""
-    },
-    "Responder": {
-      "AllowedObjectId": "<objectId-da-secao-3.3>",
-      "AllowedTenantId": "<tenantId-da-secao-3.3>"
-    }
-  }
-}
-```
-
-```bash
-$ chmod 600 ~/apps/copilot-teams-bridge/appsettings.Local.json
-```
-
-Observações:
-
-- **`AllowedPollingHosts`:** se ficar vazio, o worker só segue `Location` no mesmo host da `WebhookUrl`. Se o `Location` da [seção 3.1](#31-disparar-um-cartão-sintético) estiver em outro host, coloque esse hostname aqui (só o hostname, sem caminho). Para ver o host sem expor a URL inteira: `grep -i '^location:' headers.txt | cut -d/ -f3`.
-- **`AuthMode`:** com **Specific users in my tenant**, use `"bearer"` e aponte `BearerTokenFile` para um arquivo `600` com o token, renovado por um processo externo.
-- **Precedência:** valores podem ser sobrescritos por variáveis `TEAMSBRIDGE_*` ou por argumentos `--TeamsBridge:...` (veja o [README](../README.md#configuração)).
-
----
-
 ## 7. Validar em três etapas
 
-Avance para a próxima etapa somente quando a anterior passar. Cada pedido processado gera no log a linha `Pedido <tipo> <fingerprint> finalizado com resultado <resultado>`.
+Avance para a próxima etapa somente quando a anterior passar. Cada pedido processado gera no log a linha `Pedido <tipo> <fingerprint> finalizado com resultado <resultado>`. Em todas as etapas, o worker roda em primeiro plano com `ctb`; `Ctrl+C` encerra. Se o serviço da [seção 8](#8-rodar-como-serviço-com-quadlet) já existir, pare-o antes (`systemctl --user stop copilot-teams-bridge.service`): dois workers no mesmo chat mandariam cartões em dobro.
 
 ### Etapa 1: DryRun contra a sessão real
 
-Com `"DryRun": true`:
+Com `"DryRun": true` no arquivo:
 
 ```bash
-$ cd ~/apps/copilot-teams-bridge && dotnet copilot-teams-bridge.dll
+$ ctb
 ```
-
-> **Em container:** rode o comando `podman run` da [seção 10.4](#104-executar-manualmente) sem `--list-chats`, em primeiro plano. Se o serviço Quadlet já existir, pare-o antes (`systemctl --user stop copilot-teams-bridge.service`): dois workers no mesmo chat mandariam cartões em dobro.
 
 1. Abra a sessão do Copilot no VS Code e peça algo que exija confirmação, por exemplo uma tarefa que rode um comando no terminal.
 2. Nos logs do worker, espere ver:
@@ -428,7 +432,12 @@ O que fica comprovado: o worker conecta ao Agent Host e recebe pedidos de um seg
 
 ### Etapa 2: envio sem resposta
 
-1. Troque para `"DryRun": false` e reinicie o worker. Em container, o arquivo é `~/.config/copilot-teams-bridge/appsettings.Local.json`; encerre com `Ctrl+C` e rode o `podman run` de novo (a configuração é lida só na partida).
+1. Encerre com `Ctrl+C` e rode de novo, desligando o DryRun só nesta execução:
+
+   ```bash
+   $ ctb --TeamsBridge:DryRun=false
+   ```
+
 2. Gere uma nova confirmação no VS Code.
 3. O cartão deve aparecer no chat do Flow bot no Teams. **Não clique no Teams**: responda no VS Code.
 4. O worker não deve despachar nada; o pedido termina como `RuntimeRequestGone` ou `Expired`.
@@ -437,186 +446,24 @@ O que fica comprovado: o cartão chega ao destino certo.
 
 ### Etapa 3: prova completa
 
-1. Gere uma nova confirmação no VS Code.
+1. Com `ctb --TeamsBridge:DryRun=false` ainda rodando, gere uma nova confirmação no VS Code.
 2. Responda **no Teams**.
 3. A decisão deve aparecer na **mesma conversa** do VS Code, que continua a tarefa. O log mostra `finalizado com resultado Accepted`.
 4. Repita com **recusar** e confirme que a ferramenta não é executada.
 
-O que fica comprovado: o ciclo completo VS Code → Teams → mesma sessão.
+O que fica comprovado: o ciclo completo VS Code → Teams → mesma sessão. Agora troque para `"DryRun": false` no `appsettings.Local.json`, para que o serviço da próxima seção já suba enviando.
 
 ---
 
-## 8. Rodar como serviço
+## 8. Rodar como serviço com Quadlet
 
-> **Em container:** não use a unit desta seção. Use o **Quadlet** da [seção 10.5](#105-rodar-como-serviço-com-podman-quadlet), que gera o serviço systemd do container.
-
-Crie `~/.config/systemd/user/copilot-teams-bridge@.service`:
-
-```ini
-[Unit]
-Description=CopilotTeamsBridge (%i)
-After=copilot-agent-host.service
-
-[Service]
-WorkingDirectory=%h/apps/copilot-teams-bridge
-ExecStart=%h/.dotnet/dotnet %h/apps/copilot-teams-bridge/copilot-teams-bridge.dll --TeamsBridge:AgentHost:ChatChannel=ahp-chat:/%i
-Restart=on-failure
-RestartSec=10
-UMask=0077
-
-[Install]
-WantedBy=default.target
-```
-
-```bash
-$ systemctl --user daemon-reload
-$ systemctl --user enable --now copilot-teams-bridge@<id-do-chat>.service
-$ journalctl --user -u copilot-teams-bridge@<id-do-chat> -f
-$ loginctl enable-linger "$USER"   # mantém os serviços de usuário ativos sem sessão aberta
-```
-
-Use em `<id-do-chat>` o trecho depois de `ahp-chat:/` do URI escolhido na [seção 5.4](#54-canal-do-chat). Cada chat acompanhado precisa de uma instância própria: `copilot-teams-bridge@<outro-id>.service`. Para um URI no formato `ahp-chat://default/<valor>`, não use o template: crie uma unit sem `@`, sem o argumento `--TeamsBridge:AgentHost:ChatChannel`, e deixe o URI completo em `appsettings.Local.json`. Se o `dotnet` não estiver em `~/.dotnet`, ajuste o caminho no `ExecStart` (`command -v dotnet`).
-
----
-
-## 9. Solução de problemas
-
-| Sintoma | Causa provável | O que fazer |
-|---------|----------------|-------------|
-| Worker não inicia, com mensagem de validação (`Workflow:WebhookUrl deve ser...`) | URL ausente, HTTP ou com fragmento fora do DryRun | Revise `appsettings.Local.json` ([seção 6](#6-configurar-o-worker)). |
-| `Chave de correlacao deve ser base64...` | Chave gerada sem base64 | Gere de novo com `openssl rand -base64 32`. |
-| Erro de permissão ao ler segredo | Arquivo legível por grupo ou outros | `chmod 600` no arquivo e `chmod 700` no diretório. |
-| `--list-chats` termina com código `1` | Endpoint fora do loopback, `TokenFile` ausente ou Agent Host parado/reiniciado | Refaça as [seções 5.1 a 5.3](#5-conectar-ao-agent-host) e confira se o Agent Host está ativo. |
-| `--list-chats` termina com código `2` | Nenhuma sessão com chat nesse Agent Host | Confira se o VS Code está conectado a **este** Agent Host e se a sessão existe. |
-| `Conexao com o Agent Host encerrada` em loop | Porta ou token errados, ou Agent Host reiniciado com porta nova | Refaça a [seção 5](#5-conectar-ao-agent-host). Prefira porta e token fixos. |
-| `Entrega ao Workflow sem retorno utilizavel: Rejected (HTTP 401/403)` | **Who can trigger the flow?** não combina com `AuthMode` | **Anyone** usa `url-secret`; **Specific users** usa `bearer` com token válido. |
-| `... AcceptedWithoutReturn ...` | Resposta assíncrona desligada ou `Location` em host não aprovado | Ligue **Asynchronous response** ([seção 2.4](#24-devolver-a-resposta-ao-worker)) ou inclua o host em `AllowedPollingHosts`. |
-| `... Unavailable (HTTP 429/5xx)` ou resultado `DeliveryUnavailable` | Limite ou falha temporária do Power Automate | Veja o histórico de execuções do fluxo e gere o pedido de novo no VS Code. |
-| Cartão não aparece no Teams | App Workflows não instalado, destinatário errado ou fluxo desligado | Confira os [pré-requisitos](#1-pré-requisitos), o campo **Recipient** e se o fluxo está **On** em **My flows**. |
-| Resultado `Forbidden` | Resposta de outra conta ou tenant | Confira `AllowedObjectId`/`AllowedTenantId` ([seção 3.3](#33-anotar-os-ids)). |
-| Resultado `Expired` ou `Duplicate` | Cartão respondido depois do prazo ou mais de uma vez | Ajuste `RequestTimeToLive` e o `Timeout` da [seção 2.3](#23-publicar-o-cartão-e-esperar-a-resposta), mantendo os dois iguais. |
-| Container: `Falha ao listar chats: Arquivo de secret ausente...` ou `Arquivo de secret ausente...` | O UID do processo no container não é o dono dos arquivos montados | Use `--userns=keep-id:uid=1654,gid=1654` ([seção 10.4](#usuário-do-processo-no-container)). |
-| Container: `--list-chats` termina com `1`, mas fora do container funciona | A porta em `--network=pasta:-T,<porta>` não é a do Agent Host | Confira a porta (e se ela mudou após reinício do Agent Host, [seção 5.3](#53-alternativa-ler-do-registro-a-cada-início)). |
-| Container: `Permission denied` ao montar volume (RHEL/Fedora) | Rótulo SELinux | Mantenha o sufixo `:Z` nas montagens. |
-| Container: cartões em dobro no Teams | Worker em primeiro plano e serviço Quadlet rodando ao mesmo tempo | `systemctl --user stop copilot-teams-bridge.service` antes de testar manualmente. |
-| Erro ao salvar a ação **Response** | Resposta assíncrona indisponível nesse gatilho | Registre a mensagem: é uma das [limitações](../README.md#limitações-ainda-não-comprovadas) em validação. |
-
----
-
-## 10. Rodar em container (Podman rootless)
-
-O repositório traz um [`Containerfile`](../Containerfile) para Podman. A imagem roda o mesmo worker das seções anteriores, como **usuário sem privilégios**, e não guarda nenhum segredo nem configuração: tudo é montado na execução, somente leitura. Com container, o host não precisa do .NET SDK.
-
-As seções 2, 3, 5 e 7 continuam valendo. Só mudam a instalação (seção 4), o local da configuração (seção 6) e o serviço (seção 8); cada uma delas tem um bloco **Em container** apontando para cá.
-
-### 10.1 Pré-requisitos
-
-| Item | Como conferir |
-|------|---------------|
-| Podman 4.4 ou mais recente, em modo rootless (Quadlet e `pasta`) | `$ podman info --format '{{.Host.Security.Rootless}}'` responde `true`. |
-| Agent Host com **porta e token fixos** | [Seção 5.2](#52-opção-recomendada-porta-e-token-fixos). Com porta variável, o comando do container teria de mudar a cada reinício. |
-
-### 10.2 Construir a imagem
-
-```bash
-$ cd ~/src/CopilotTeamsBridge && git pull
-$ podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
-```
-
-O build compila em modo Release dentro do container (`mcr.microsoft.com/dotnet/sdk:10.0`) e gera uma imagem final de cerca de 240 MB baseada em `mcr.microsoft.com/dotnet/aspnet:10.0`. O arquivo [`.containerignore`](../.containerignore) impede que `appsettings.Local.json`, `*.key`, `*.token` e `*.bearer` entrem no contexto de build.
-
-Para atualizar depois: `git pull`, repita o `build` e reinicie o serviço (seção 10.5).
-
-### 10.3 Preparar segredos e configuração
-
-A imagem procura os segredos em `/secrets` (as variáveis `TEAMSBRIDGE_TeamsBridge__CorrelationKeyFile` e `TEAMSBRIDGE_TeamsBridge__AgentHost__TokenFile` já apontam para lá) e a configuração em `/app/appsettings.Local.json`. Use o mesmo diretório da [seção 4.2](#42-criar-o-diretório-de-segredos):
-
-```text
-~/.config/copilot-teams-bridge/        (700)
-├── correlation.key                    (600)
-├── agent-host.token                   (600)
-├── workflow.bearer                    (600, só no modo bearer)
-└── appsettings.Local.json             (600)
-```
-
-Crie `~/.config/copilot-teams-bridge/appsettings.Local.json` como na [seção 6](#6-configurar-o-worker), com duas diferenças:
-
-- **Não** informe `CorrelationKeyFile` nem `AgentHost:TokenFile`: as variáveis da imagem têm precedência e apontam para `/secrets`.
-- No modo `bearer`, use `"BearerTokenFile": "/secrets/workflow.bearer"`, que é o caminho **dentro** do container.
-
-```json
-{
-  "TeamsBridge": {
-    "DryRun": true,
-    "AgentHost": {
-      "Endpoint": "ws://127.0.0.1:<porta>/",
-      "ChatChannel": "ahp-chat:/<id-do-chat>"
-    },
-    "Workflow": {
-      "WebhookUrl": "https://<url-do-webhook-copiada-na-secao-2.5>",
-      "AuthMode": "url-secret"
-    },
-    "Responder": {
-      "AllowedObjectId": "<objectId-da-secao-3.3>",
-      "AllowedTenantId": "<tenantId-da-secao-3.3>"
-    }
-  }
-}
-```
-
-```bash
-$ chmod 600 ~/.config/copilot-teams-bridge/appsettings.Local.json
-```
-
-### 10.4 Executar manualmente
-
-Defina a porta fixa do Agent Host numa variável do shell, para não repeti-la:
-
-```bash
-$ PORTA=<porta>
-$ CFG=~/.config/copilot-teams-bridge
-```
-
-**Descobrir o chat** (equivale à [seção 5.4](#54-canal-do-chat)):
-
-```bash
-$ podman run --rm \
-    --network=pasta:-T,$PORTA \
-    --userns=keep-id:uid=1654,gid=1654 \
-    --read-only --cap-drop=all --security-opt=no-new-privileges \
-    -v $CFG:/secrets:ro,Z \
-    -v $CFG/appsettings.Local.json:/app/appsettings.Local.json:ro,Z \
-    localhost/copilot-teams-bridge:latest --list-chats
-```
-
-**Rodar o worker** em primeiro plano (para as etapas da [seção 7](#7-validar-em-três-etapas)): repita o mesmo comando **sem** `--list-chats`. Os logs aparecem no terminal; `Ctrl+C` encerra. Para mudar algo só nesta execução, acrescente argumentos depois do nome da imagem, por exemplo `--TeamsBridge:DryRun=false`.
-
-O que cada opção faz:
-
-| Opção | Motivo |
-|-------|--------|
-| `--network=pasta:-T,$PORTA` | Rede isolada: dentro do container, `127.0.0.1:$PORTA` é encaminhado para a mesma porta no loopback do host. O container não enxerga nenhuma outra porta local, mas continua com saída HTTPS para o webhook. O worker exige endpoint em loopback, e é isso que ele vê. |
-| `--userns=keep-id:uid=1654,gid=1654` | Ver [Usuário do processo no container](#usuário-do-processo-no-container), logo abaixo. |
-| `--read-only`, `--cap-drop=all`, `--security-opt=no-new-privileges` | O worker não grava em disco nem precisa de capabilities. |
-| `-v ...:ro,Z` | Montagens somente leitura. O `Z` aplica o rótulo SELinux exigido em RHEL/Fedora; em distribuições sem SELinux, ele é ignorado. |
-
-Alternativa mais simples, com menos isolamento: `--network=host`. O container passa a usar a rede do host inteira; funciona igual, mas enxerga todas as portas locais.
-
-#### Usuário do processo no container
-
-O worker recusa segredos legíveis por grupo ou outros (`600`). Dentro do container, o arquivo continua pertencendo ao **seu** usuário, então o processo precisa rodar com esse mesmo UID. `--userns=keep-id:uid=1654,gid=1654` mapeia o seu UID do host para o usuário `app` (1654) da imagem: o processo roda como `app` no container e como você no host, sem nenhum privilégio extra.
-
-Sem isso, o processo roda com outro UID, não consegue ler os arquivos e termina com `Arquivo de secret ausente ou com caminho relativo`.
-
-### 10.5 Rodar como serviço com Podman Quadlet
-
-No Podman, o jeito recomendado de manter o container como serviço de usuário é o **Quadlet**: um arquivo `.container` que o systemd converte em unit. Ele substitui a unit da [seção 8](#8-rodar-como-serviço); não use as duas ao mesmo tempo.
+O **Quadlet** é o jeito nativo do Podman de manter um container como serviço systemd de usuário: você escreve um arquivo `.container` e o systemd gera a unit.
 
 Crie `~/.config/containers/systemd/copilot-teams-bridge.container`, trocando `<porta>` pela porta fixa do Agent Host:
 
 ```ini
 [Unit]
-Description=CopilotTeamsBridge (container)
+Description=CopilotTeamsBridge
 After=copilot-agent-host.service
 
 [Container]
@@ -627,8 +474,8 @@ UserNS=keep-id:uid=1654,gid=1654
 ReadOnly=true
 DropCapability=all
 NoNewPrivileges=true
-Volume=%h/.config/copilot-teams-bridge:/secrets:ro,Z
-Volume=%h/.config/copilot-teams-bridge/appsettings.Local.json:/app/appsettings.Local.json:ro,Z
+Volume=%h/.config/copilot-teams-bridge:/secrets:ro,z
+Volume=%h/.config/copilot-teams-bridge/appsettings.Local.json:/app/appsettings.Local.json:ro,z
 LogDriver=journald
 
 [Service]
@@ -639,8 +486,11 @@ RestartSec=10
 WantedBy=default.target
 ```
 
+Se o serviço do seu Agent Host tiver outro nome, ajuste o `After=`.
+
 ```bash
-$ /usr/libexec/podman/quadlet -dryrun -user   # confere o arquivo; não deve mostrar erro
+$ mkdir -p ~/.config/containers/systemd
+$ /usr/libexec/podman/quadlet -dryrun -user > /dev/null   # sem saída de erro = arquivo válido
 $ systemctl --user daemon-reload
 $ systemctl --user start copilot-teams-bridge.service
 $ journalctl --user -u copilot-teams-bridge -f
@@ -650,16 +500,43 @@ $ loginctl enable-linger "$USER"   # mantém o serviço ativo sem sessão aberta
 Observações:
 
 - Units geradas pelo Quadlet não aceitam `systemctl enable`. Quem liga o serviço no boot é a seção `[Install]`, aplicada no `daemon-reload`.
-- **Vários chats:** crie um arquivo `.container` por chat (por exemplo `copilot-teams-bridge-projetoX.container`), cada um com seu `ContainerName` e um `appsettings.Local.json` próprio montado em `/app/appsettings.Local.json`. Também dá para manter um único arquivo de configuração e passar o canal com `Exec=--TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<id>`.
-- Depois de reconstruir a imagem (seção 10.2), rode `systemctl --user restart copilot-teams-bridge.service`.
+- **Atualizar:** `git pull`, `podman build` ([seção 4.1](#41-construir-a-imagem)) e `systemctl --user restart copilot-teams-bridge.service`.
+- **Mudou a configuração:** `systemctl --user restart copilot-teams-bridge.service`.
+- **Vários chats:** cada instância atende um chat. Copie o arquivo com outro nome (por exemplo `copilot-teams-bridge-projetox.container`), troque o `ContainerName` e acrescente na seção `[Container]` a linha `Exec=--TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<outro-id>`, que sobrescreve o chat do `appsettings.Local.json`. Depois, `daemon-reload` e `start` do novo serviço.
+- **Revogar rapidamente:** `systemctl --user stop copilot-teams-bridge.service` ou desligue o fluxo no Power Automate (veja [Cuidados de segurança](#cuidados-de-segurança)).
 
-> **Validação:** a imagem e os comandos desta seção foram testados com **Podman 5.8 rootless** no RHEL 9 (rede `pasta` e `host`, `keep-id`, SELinux, Quadlet).
+---
+
+## 9. Solução de problemas
+
+| Sintoma | Causa provável | O que fazer |
+|---------|----------------|-------------|
+| Worker não inicia, com mensagem de validação (`Workflow:WebhookUrl deve ser...`) | URL ausente, HTTP ou com fragmento fora do DryRun | Revise `appsettings.Local.json` ([seção 6.1](#61-criar-o-appsettingslocaljson)). |
+| `Chave de correlacao deve ser base64...` | Chave gerada sem base64 | Gere de novo com `openssl rand -base64 32` ([seção 4.2](#42-criar-o-diretório-de-segredos)). |
+| `Arquivo de secret ausente ou com caminho relativo` | Arquivo inexistente, caminho fora de `/secrets` ou container sem `--userns=keep-id:uid=1654,gid=1654` | Confira os arquivos da [seção 4.2](#42-criar-o-diretório-de-segredos), os caminhos da [seção 6.1](#61-criar-o-appsettingslocaljson) e as opções da [seção 6.2](#62-definir-o-comando-base). |
+| `Arquivo de secret deve ter permissao restrita ao dono` | Arquivo legível por grupo ou outros | `chmod 600` no arquivo e `chmod 700` no diretório. |
+| `Error: ... statfs ...: no such file or directory` ao rodar o container | `appsettings.Local.json` ainda não existe | Crie o arquivo ([seção 6.1](#61-criar-o-appsettingslocaljson)) antes de rodar `ctb`. |
+| `Permission denied` ao ler `/secrets` (RHEL/Fedora) | Rótulo SELinux | Mantenha o sufixo `z` nas montagens. |
+| `--list-chats` termina com código `1` | Porta errada em `CTB_PORTA`/`Endpoint`, token ausente ou Agent Host parado/reiniciado | Refaça a [seção 5](#5-conectar-ao-agent-host). A porta precisa ser a mesma em `CTB_PORTA` e em `AgentHost:Endpoint`. |
+| `--list-chats` termina com código `2` | Nenhuma sessão com chat nesse Agent Host | Confira se o VS Code está conectado a **este** Agent Host e se a sessão existe. |
+| `Conexao com o Agent Host encerrada` em loop | Porta ou token errados, ou Agent Host reiniciado com porta nova | Refaça a [seção 5](#5-conectar-ao-agent-host). Prefira porta e token fixos. |
+| `the container name "copilot-teams-bridge-manual" is already in use` | Outra execução manual ainda ativa | Encerre-a com `Ctrl+C` ou `podman stop copilot-teams-bridge-manual`. |
+| Cartões em dobro no Teams | Execução manual e serviço Quadlet ao mesmo tempo, ou dois serviços no mesmo chat | `systemctl --user stop copilot-teams-bridge.service` antes de testar manualmente; confira o `ChatChannel` de cada serviço. |
+| `Entrega ao Workflow sem retorno utilizavel: Rejected (HTTP 401/403)` | **Who can trigger the flow?** não combina com `AuthMode` | **Anyone** usa `url-secret`; **Specific users** usa `bearer` com token válido. |
+| `... AcceptedWithoutReturn ...` | Resposta assíncrona desligada ou `Location` em host não aprovado | Ligue **Asynchronous response** ([seção 2.4](#24-devolver-a-resposta-ao-worker)) ou inclua o host em `AllowedPollingHosts`. |
+| `... Unavailable (HTTP 429/5xx)` ou resultado `DeliveryUnavailable` | Limite ou falha temporária do Power Automate | Veja o histórico de execuções do fluxo e gere o pedido de novo no VS Code. |
+| Cartão não aparece no Teams | App Workflows não instalado, destinatário errado ou fluxo desligado | Confira os [pré-requisitos](#1-pré-requisitos), o campo **Recipient** e se o fluxo está **On** em **My flows**. |
+| Resultado `Forbidden` | Resposta de outra conta ou tenant | Confira `AllowedObjectId`/`AllowedTenantId` ([seção 3.3](#33-anotar-os-ids)). |
+| Resultado `Expired` ou `Duplicate` | Cartão respondido depois do prazo ou mais de uma vez | Ajuste `RequestTimeToLive` e o `Timeout` da [seção 2.3](#23-publicar-o-cartão-e-esperar-a-resposta), mantendo os dois iguais. |
+| Erro ao salvar a ação **Response** | Resposta assíncrona indisponível nesse gatilho | Registre a mensagem: é uma das [limitações](../README.md#limitações-ainda-não-comprovadas) em validação. |
+| Serviço não sobe após reboot | Linger desligado | `loginctl enable-linger "$USER"`. |
 
 ---
 
 ## Cuidados de segurança
 
-- Trate a URL do webhook, os tokens e a chave de correlação como senhas. Eles ficam só no host, em arquivos `600`.
-- O Agent Host nunca deve ouvir fora de `localhost`, e o worker não abre portas.
+- Trate a URL do webhook, os tokens e a chave de correlação como senhas. Eles ficam só em `~/.config/copilot-teams-bridge` (700/600), montados somente leitura; a imagem não contém nenhum deles.
+- O Agent Host nunca deve ouvir fora de `localhost`. O container só alcança a porta do Agent Host (`pasta -T`) e não publica portas.
+- O container roda sem root, sem capabilities, com sistema de arquivos somente leitura e `no-new-privileges`.
 - O worker nunca aprova sozinho. Cada decisão precisa vir de uma resposta sua, com token de correlação válido e não expirado.
 - Para revogar o acesso imediatamente, desligue o fluxo em **My flows** → `CopilotTeamsBridge` → **Turn off** (Desativar). Também é possível excluir o gatilho, o que gera uma nova URL.

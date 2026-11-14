@@ -1,4 +1,4 @@
-# Imagem do CopilotTeamsBridge para Podman rootless. Veja docs/tutorial-configuracao.md, seção 10.
+# Imagem do CopilotTeamsBridge para Podman rootless. Veja docs/tutorial-configuracao.md, seções 4 e 8.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

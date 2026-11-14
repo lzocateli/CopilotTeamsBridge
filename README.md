@@ -23,33 +23,45 @@ Restrições de segurança:
 
 ## Requisitos
 
-- .NET SDK 10 (veja `global.json`).
-- Agent Host do Copilot em execução no mesmo host, com token de conexão.
+- Host Linux com Podman 4.4 ou mais recente em modo rootless. O .NET SDK só é necessário para desenvolver (veja [Desenvolvimento](#desenvolvimento)).
+- Agent Host do Copilot em execução no mesmo host, com porta e token de conexão fixos.
 - Um fluxo no Teams Workflows com:
   1. Trigger **"When a Teams webhook request is received"**.
   2. Ação **"Post adaptive card in a chat or channel and wait for a response"**, usando o cartão recebido no corpo.
   3. Ação **Response** com *Asynchronous response* ligado, devolvendo `{ "responder": <responder da ação anterior>, "data": <dados enviados pelo cartão> }`.
 
+## Instalação
+
+O worker roda em container. A imagem, gerada pelo [`Containerfile`](Containerfile), não guarda segredos e roda como o usuário sem privilégios `app` (UID 1654).
+
+```bash
+git clone https://github.com/lzocateli/CopilotTeamsBridge.git && cd CopilotTeamsBridge
+podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
+
+install -d -m 700 ~/.config/copilot-teams-bridge
+openssl rand -base64 32 > ~/.config/copilot-teams-bridge/correlation.key
+# grave o token do Agent Host em agent-host.token (e, no modo bearer, o token em workflow.bearer) sem exibi-los no terminal
+chmod 600 ~/.config/copilot-teams-bridge/*
+```
+
+O diretório `~/.config/copilot-teams-bridge` é montado somente leitura em `/secrets`. A imagem já aponta `CorrelationKeyFile` para `/secrets/correlation.key` e `AgentHost:TokenFile` para `/secrets/agent-host.token`.
+
 ## Configuração
 
-Toda a configuração fica na seção `TeamsBridge` de [appsettings.json](src/CopilotTeamsBridge.Worker/appsettings.json). Esse arquivo é versionado e só contém placeholders.
-
-Os valores reais vão em `appsettings.Local.json`, que fica ao lado do binário e está no `.gitignore`:
+Os valores padrão ficam na seção `TeamsBridge` de [appsettings.json](src/CopilotTeamsBridge.Worker/appsettings.json), embutido na imagem e só com placeholders. Os valores reais vão em `~/.config/copilot-teams-bridge/appsettings.Local.json` (permissão `600`), montado em `/app/appsettings.Local.json`:
 
 ```json
 {
   "TeamsBridge": {
     "DryRun": false,
-    "CorrelationKeyFile": "/home/<usuario>/.config/copilot-teams-bridge/correlation.key",
     "AgentHost": {
       "Endpoint": "ws://127.0.0.1:<porta-do-agent-host>/",
-      "TokenFile": "/home/<usuario>/.config/copilot-teams-bridge/agent-host.token",
       "ChatChannel": "ahp-chat:/<id-do-chat>"
     },
     "Workflow": {
       "WebhookUrl": "https://<host-do-trigger>/<caminho-do-webhook>",
       "AuthMode": "bearer",
-      "BearerTokenFile": "/home/<usuario>/.config/copilot-teams-bridge/workflow.bearer"
+      "BearerTokenFile": "/secrets/workflow.bearer"
     },
     "Responder": {
       "AllowedObjectId": "<object-id-entra>",
@@ -59,80 +71,52 @@ Os valores reais vão em `appsettings.Local.json`, que fica ao lado do binário 
 }
 ```
 
+Caminhos de arquivo na configuração são vistos de dentro do container: use sempre o prefixo `/secrets/`.
+
 A configuração é carregada nesta ordem; cada fonte sobrescreve a anterior:
 
-1. `appsettings.json`
-2. `appsettings.Local.json`
-3. variáveis `TEAMSBRIDGE_*` (por exemplo, `TEAMSBRIDGE_TeamsBridge__Workflow__WebhookUrl`)
-4. argumentos de linha de comando (por exemplo, `--TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<id>`)
+1. `appsettings.json` da imagem
+2. `appsettings.Local.json` montado
+3. variáveis `TEAMSBRIDGE_*` (a imagem define `TEAMSBRIDGE_TeamsBridge__CorrelationKeyFile` e `TEAMSBRIDGE_TeamsBridge__AgentHost__TokenFile`)
+4. argumentos depois do nome da imagem no `podman run` (por exemplo, `--TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<id>`)
 
 Regras dos campos:
 
 | Campo | Regra |
 |-------|-------|
 | `DryRun` | O padrão é `true`: monta os cartões, mas não chama o webhook nem responde ao Agent Host. |
+| `AgentHost:Endpoint` | Precisa ser loopback (`127.0.0.1` ou `localhost`). No container, a rede `pasta:-T,<porta>` encaminha essa porta para o Agent Host do host. |
 | `Workflow:WebhookUrl` | Obrigatório fora do DryRun. Precisa ser HTTPS absoluta, sem credenciais nem fragmento. Se a URL tiver assinatura (`sig=`), trate-a como segredo. |
 | `Workflow:AllowedPollingHosts` | Lista os hosts aceitos no `Location` do polling. Se ficar vazia, só o host da `WebhookUrl` é aceito. |
 | `Workflow:AuthMode` | `bearer` envia o conteúdo de `BearerTokenFile`. `url-secret` não envia `Authorization` e conta só com a assinatura da URL. |
 | `CorrelationKeyFile` | Chave HMAC em base64, com pelo menos 32 bytes. |
 
-Para preparar os segredos:
+## Uso
+
+Todas as execuções usam as mesmas opções de isolamento: rede limitada à porta do Agent Host, UID do host mapeado para o usuário `app` (necessário para ler os arquivos `600`), sistema de arquivos somente leitura e nenhuma capability.
 
 ```bash
-install -d -m 700 ~/.config/copilot-teams-bridge
-openssl rand -base64 32 > ~/.config/copilot-teams-bridge/correlation.key
-# grave o token do Agent Host e o bearer do Workflow sem imprimi-los no terminal
-chmod 600 ~/.config/copilot-teams-bridge/*
+podman run --rm --network=pasta:-T,<porta> --userns=keep-id:uid=1654,gid=1654 \
+  --read-only --cap-drop=all --security-opt=no-new-privileges \
+  -v ~/.config/copilot-teams-bridge:/secrets:ro,z \
+  -v ~/.config/copilot-teams-bridge/appsettings.Local.json:/app/appsettings.Local.json:ro,z \
+  localhost/copilot-teams-bridge:latest --list-chats
 ```
 
-## Uso
+- `--list-chats` lista os chats do Agent Host e termina sem enviar nada ao Teams. O chat marcado com `*` é o principal de cada sessão; copie-o para `AgentHost:ChatChannel` (detalhes na [seção 6.3 do tutorial](docs/tutorial-configuracao.md#63-descobrir-o-canal-do-chat)).
+- Sem `--list-chats`, o mesmo comando roda o worker em primeiro plano.
+- Para rodar como serviço, use um arquivo Quadlet em `~/.config/containers/systemd/` ([seção 8 do tutorial](docs/tutorial-configuracao.md#8-rodar-como-serviço-com-quadlet)).
+
+Cada instância atende **um** chat do Agent Host. Para atender vários projetos ou sessões, rode uma instância por `ChatChannel`.
+
+## Desenvolvimento
+
+Para alterar o código, use o .NET SDK 10 (veja `global.json`):
 
 ```bash
 dotnet build CopilotTeamsBridge.slnx
 dotnet test CopilotTeamsBridge.slnx
 ```
-
-Para descobrir o `ChatChannel`, liste os chats do Agent Host. O comando só lê e termina, sem enviar nada ao Teams; o chat marcado com `*` é o principal de cada sessão (detalhes no [tutorial](docs/tutorial-configuracao.md#54-canal-do-chat)):
-
-```bash
-dotnet run --project src/CopilotTeamsBridge.Worker -- --list-chats \
-  --TeamsBridge:AgentHost:Endpoint=ws://127.0.0.1:<porta>/ \
-  --TeamsBridge:AgentHost:TokenFile=<arquivo-do-token>
-```
-
-```bash
-dotnet run --project src/CopilotTeamsBridge.Worker -- --TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<id-do-chat>
-```
-
-Cada instância atende **um** chat do Agent Host. Para atender vários projetos ou sessões, rode uma instância por `ChatChannel`. Exemplo de unit systemd de usuário (`~/.config/systemd/user/copilot-teams-bridge@.service`):
-
-```ini
-[Unit]
-Description=CopilotTeamsBridge (%i)
-
-[Service]
-ExecStart=%h/.dotnet/dotnet %h/apps/copilot-teams-bridge/copilot-teams-bridge.dll --TeamsBridge:AgentHost:ChatChannel=ahp-chat:/%i
-Restart=on-failure
-UMask=0077
-
-[Install]
-WantedBy=default.target
-```
-
-## Container (Podman rootless)
-
-O [`Containerfile`](Containerfile) gera uma imagem sem segredos, que roda como usuário sem privilégios. Segredos e configuração são montados somente leitura em `/secrets` e `/app/appsettings.Local.json`. Exemplo:
-
-```bash
-podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
-podman run --rm --network=pasta:-T,<porta> --userns=keep-id:uid=1654,gid=1654 \
-  --read-only --cap-drop=all --security-opt=no-new-privileges \
-  -v ~/.config/copilot-teams-bridge:/secrets:ro,Z \
-  -v ~/.config/copilot-teams-bridge/appsettings.Local.json:/app/appsettings.Local.json:ro,Z \
-  localhost/copilot-teams-bridge:latest --list-chats
-```
-
-Sem `--list-chats`, o mesmo comando roda o worker. Serviço com Podman Quadlet e detalhes de rede e UID estão na [seção 10 do tutorial](docs/tutorial-configuracao.md#10-rodar-em-container-podman-rootless).
 
 ## Limitações ainda não comprovadas
 
