@@ -2,6 +2,7 @@ using System.Net;
 using CopilotTeamsBridge.Worker.AgentHost;
 using CopilotTeamsBridge.Worker.Bridge;
 using CopilotTeamsBridge.Worker.Configuration;
+using CopilotTeamsBridge.Worker.Discovery;
 using CopilotTeamsBridge.Worker.Security;
 using CopilotTeamsBridge.Worker.Teams;
 using Microsoft.Extensions.Configuration;
@@ -53,6 +54,7 @@ internal static class TeamsBridgeServiceRegistration
             return new CorrelationTokenService(key, provider.GetRequiredService<TimeProvider>());
         });
         _ = services.AddSingleton<IAhpConnectionFactory, AhpConnectionFactory>();
+        _ = services.AddSingleton<IChatDiscovery, ChatDiscovery>();
         _ = services.AddSingleton<IAgentHostSession, AgentHostSession>();
         _ = services.AddSingleton<IPendingInteractionTracker, PendingInteractionTracker>();
         _ = services.AddSingleton<IAdaptiveCardBuilder, AdaptiveCardBuilder>();

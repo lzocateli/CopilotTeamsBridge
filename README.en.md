@@ -90,6 +90,17 @@ chmod 600 ~/.config/copilot-teams-bridge/*
 ```bash
 dotnet build CopilotTeamsBridge.slnx
 dotnet test CopilotTeamsBridge.slnx
+```
+
+To find the `ChatChannel`, list the Agent Host chats. The command is read-only and exits without sending anything to Teams; the chat marked with `*` is the main chat of each session (details in the [tutorial, pt-BR](docs/tutorial-configuracao.md#54-canal-do-chat)):
+
+```bash
+dotnet run --project src/CopilotTeamsBridge.Worker -- --list-chats \
+  --TeamsBridge:AgentHost:Endpoint=ws://127.0.0.1:<port>/ \
+  --TeamsBridge:AgentHost:TokenFile=<token-file>
+```
+
+```bash
 dotnet run --project src/CopilotTeamsBridge.Worker -- --TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<chat-id>
 ```
 
@@ -113,7 +124,7 @@ WantedBy=default.target
 - Posting to the self-chat (`48:notes`) through the Workflow.
 - *Asynchronous response* on the Teams webhook trigger (the documentation covers the HTTP trigger).
 - Whether the Agent Host delivers `inputRequested` to a second client and accepts its answer.
-- The exact Agent Host WebSocket URI in each version.
+- Other Agent Host versions: the connection (`ws://127.0.0.1:<port>/` with token), the chat subscription and `--list-chats` were verified only on the version used during development.
 
 Keep `DryRun=true` until you have validated these points in your environment.
 

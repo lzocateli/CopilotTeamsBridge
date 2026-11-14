@@ -11,6 +11,10 @@ internal static class AhpProtocol
 
     public const string InitializeMethod = "initialize";
     public const string SubscribeMethod = "subscribe";
+    public const string UnsubscribeMethod = "unsubscribe";
+    public const string ListSessionsMethod = "listSessions";
+    public const string SessionScheme = "ahp-session:/";
+    public const string ChatScheme = "ahp-chat:/";
     public const string DispatchActionMethod = "dispatchAction";
     public const string ActionNotification = "action";
 

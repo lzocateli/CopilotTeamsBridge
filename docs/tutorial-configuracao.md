@@ -286,7 +286,43 @@ Repita esse passo sempre que o Agent Host reiniciar.
 
 ### 5.4 Canal do chat
 
-O `ChatChannel` identifica a conversa do Copilot que o worker vai acompanhar, no formato `ahp-chat:/<id>`. **Ainda não existe um procedimento validado para obter esse identificador**: ele faz parte da primeira etapa da [seção 7](#7-validar-em-três-etapas). Até lá, use um valor provisório, por exemplo `ahp-chat:/pendente`, com `DryRun=true`.
+O `ChatChannel` identifica a conversa do Copilot que o worker vai acompanhar. Para descobri-lo, rode o worker no modo `--list-chats`. Ele conecta ao Agent Host com o endpoint e o token das seções anteriores, lista as sessões mais recentes (até 20) com seus chats e termina. Nada é enviado ao Teams, e o webhook, a chave de correlação e o `ChatChannel` não precisam estar configurados.
+
+```bash
+$ cd ~/apps/copilot-teams-bridge
+$ dotnet copilot-teams-bridge.dll --list-chats \
+    --TeamsBridge:AgentHost:Endpoint=ws://127.0.0.1:<porta>/ \
+    --TeamsBridge:AgentHost:TokenFile=$HOME/.config/copilot-teams-bridge/agent-host.token
+```
+
+Exemplo de saída (os títulos são os mesmos que aparecem na lista de sessões do VS Code):
+
+```text
+Chats do Agent Host (sessoes mais recentes primeiro; * = chat padrao da sessao):
+
+Sessao: Pendências do projeto
+  * ahp-chat:/7b62184e-0000-0000-0000-000000000000  Pendências do projeto
+    ahp-chat:/8df6f60c-0000-0000-0000-000000000000  Critique pass
+
+Sessao: resposta PRONTO
+  * ahp-chat:/b51a129b-0000-0000-0000-000000000000  resposta PRONTO
+```
+
+Como escolher:
+
+1. Localize a sessão pelo título que aparece no VS Code.
+2. Copie o URI marcado com `*`. É o chat principal da sessão, onde você conversa com o Copilot. Os demais são chats auxiliares criados por subagentes (por exemplo `Critique pass`).
+3. Use o URI completo em `AgentHost:ChatChannel` na [seção 6](#6-configurar-o-worker).
+
+Se o endpoint e o token já estiverem em `appsettings.Local.json`, basta `dotnet copilot-teams-bridge.dll --list-chats`.
+
+| Código de saída | Significado |
+|-----------------|-------------|
+| `0` | Chats listados. |
+| `2` | Conexão feita, mas nenhum chat encontrado. Abra ou crie a sessão no VS Code e repita. |
+| `1` | Falha: endpoint fora de `127.0.0.1`/`localhost`, token ausente ou inválido, ou Agent Host inacessível. A mensagem não mostra o token nem a URI. |
+
+> Sessões criadas sem chats adicionais podem mostrar o chat padrão no formato `ahp-chat://default/<valor>`. Esse URI também é válido: copie-o inteiro, sem alterar nada.
 
 ---
 
@@ -404,7 +440,7 @@ $ journalctl --user -u copilot-teams-bridge@<id-do-chat> -f
 $ loginctl enable-linger "$USER"   # mantém os serviços de usuário ativos sem sessão aberta
 ```
 
-Cada chat acompanhado precisa de uma instância própria: `copilot-teams-bridge@<outro-id>.service`. Se o `dotnet` não estiver em `~/.dotnet`, ajuste o caminho no `ExecStart` (`command -v dotnet`).
+Use em `<id-do-chat>` o trecho depois de `ahp-chat:/` do URI escolhido na [seção 5.4](#54-canal-do-chat). Cada chat acompanhado precisa de uma instância própria: `copilot-teams-bridge@<outro-id>.service`. Para um URI no formato `ahp-chat://default/<valor>`, não use o template: crie uma unit sem `@`, sem o argumento `--TeamsBridge:AgentHost:ChatChannel`, e deixe o URI completo em `appsettings.Local.json`. Se o `dotnet` não estiver em `~/.dotnet`, ajuste o caminho no `ExecStart` (`command -v dotnet`).
 
 ---
 
@@ -415,6 +451,8 @@ Cada chat acompanhado precisa de uma instância própria: `copilot-teams-bridge@
 | Worker não inicia, com mensagem de validação (`Workflow:WebhookUrl deve ser...`) | URL ausente, HTTP ou com fragmento fora do DryRun | Revise `appsettings.Local.json` ([seção 6](#6-configurar-o-worker)). |
 | `Chave de correlacao deve ser base64...` | Chave gerada sem base64 | Gere de novo com `openssl rand -base64 32`. |
 | Erro de permissão ao ler segredo | Arquivo legível por grupo ou outros | `chmod 600` no arquivo e `chmod 700` no diretório. |
+| `--list-chats` termina com código `1` | Endpoint fora do loopback, `TokenFile` ausente ou Agent Host parado/reiniciado | Refaça as [seções 5.1 a 5.3](#5-conectar-ao-agent-host) e confira se o Agent Host está ativo. |
+| `--list-chats` termina com código `2` | Nenhuma sessão com chat nesse Agent Host | Confira se o VS Code está conectado a **este** Agent Host e se a sessão existe. |
 | `Conexao com o Agent Host encerrada` em loop | Porta ou token errados, ou Agent Host reiniciado com porta nova | Refaça a [seção 5](#5-conectar-ao-agent-host). Prefira porta e token fixos. |
 | `Entrega ao Workflow sem retorno utilizavel: Rejected (HTTP 401/403)` | **Who can trigger the flow?** não combina com `AuthMode` | **Anyone** usa `url-secret`; **Specific users** usa `bearer` com token válido. |
 | `... AcceptedWithoutReturn ...` | Resposta assíncrona desligada ou `Location` em host não aprovado | Ligue **Asynchronous response** ([seção 2.4](#24-devolver-a-resposta-ao-worker)) ou inclua o host em `AllowedPollingHosts`. |
