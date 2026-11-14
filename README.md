@@ -1,5 +1,7 @@
 # CopilotTeamsBridge
 
+**Português (Brasil)** | [English](README.en.md) | [Español](README.es.md)
+
 Worker .NET 10 independente que leva pedidos de confirmação e de entrada de uma sessão do Copilot (Agent Host/AHP) para um chat do Microsoft Teams. O transporte é o **webhook de um fluxo do Teams Workflows**, sem Microsoft Graph. A resposta dada no Teams volta para a **mesma sessão**.
 
 Pode ser usado por qualquer projeto: o worker não conhece o repositório de origem, só o canal de chat do Agent Host e o webhook configurados.
@@ -112,3 +114,7 @@ WantedBy=default.target
 - A URI exata do WebSocket do Agent Host em cada versão.
 
 Mantenha `DryRun=true` até validar esses pontos no seu ambiente.
+
+## Licença
+
+Distribuído sob a licença MIT. Veja [LICENSE](LICENSE).
