@@ -119,9 +119,9 @@ UMask=0077
 WantedBy=default.target
 ```
 
-## Container (Podman ou Docker rootless)
+## Container (Podman rootless)
 
-O [`Containerfile`](Containerfile) gera uma imagem sem segredos, que roda como usuário sem privilégios. Segredos e configuração são montados somente leitura em `/secrets` e `/app/appsettings.Local.json`. Exemplo com Podman rootless:
+O [`Containerfile`](Containerfile) gera uma imagem sem segredos, que roda como usuário sem privilégios. Segredos e configuração são montados somente leitura em `/secrets` e `/app/appsettings.Local.json`. Exemplo:
 
 ```bash
 podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
@@ -132,7 +132,7 @@ podman run --rm --network=pasta:-T,<porta> --userns=keep-id:uid=1654,gid=1654 \
   localhost/copilot-teams-bridge:latest --list-chats
 ```
 
-Sem `--list-chats`, o mesmo comando roda o worker. Serviço com Podman Quadlet, Docker rootless e detalhes de rede e UID estão na [seção 10 do tutorial](docs/tutorial-configuracao.md#10-rodar-em-container-podman-ou-docker-rootless).
+Sem `--list-chats`, o mesmo comando roda o worker. Serviço com Podman Quadlet e detalhes de rede e UID estão na [seção 10 do tutorial](docs/tutorial-configuracao.md#10-rodar-em-container-podman-rootless).
 
 ## Limitações ainda não comprovadas
 

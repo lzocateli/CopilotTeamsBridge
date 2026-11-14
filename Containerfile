@@ -1,5 +1,4 @@
-# syntax=docker/dockerfile:1
-# Imagem do CopilotTeamsBridge para Podman/Docker rootless. Veja docs/tutorial-configuracao.md, seção 10.
+# Imagem do CopilotTeamsBridge para Podman rootless. Veja docs/tutorial-configuracao.md, seção 10.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

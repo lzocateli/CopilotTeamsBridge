@@ -11,9 +11,11 @@ Este tutorial monta tudo o que o worker precisa para levar pedidos de uma sessã
 7. [Validar em três etapas](#7-validar-em-três-etapas)
 8. [Rodar como serviço](#8-rodar-como-serviço)
 9. [Solução de problemas](#9-solução-de-problemas)
-10. [Rodar em container (Podman ou Docker rootless)](#10-rodar-em-container-podman-ou-docker-rootless)
+10. [Rodar em container (Podman rootless)](#10-rodar-em-container-podman-rootless)
 
 > **Antes de começar:** alguns pontos ainda não foram comprovados em ambiente real (veja [Limitações](../README.md#limitações-ainda-não-comprovadas)). Por isso o worker vem com `DryRun=true` e a validação da [seção 7](#7-validar-em-três-etapas) é feita em etapas.
+
+**Dois modos de execução.** O worker pode rodar como binário .NET no host ou em **container Podman rootless**. As seções 2, 3 e 5.1 a 5.3 são iguais nos dois modos. Onde o procedimento muda, há um bloco **Em container** com o equivalente; os detalhes ficam na [seção 10](#10-rodar-em-container-podman-rootless).
 
 Convenções usadas aqui:
 
@@ -30,7 +32,8 @@ Convenções usadas aqui:
 | Conta Microsoft 365 corporativa com Teams e Power Automate | Acesse <https://make.powerautomate.com> e veja se o portal abre sem pedir licença. |
 | App **Workflows** instalado no Teams | No Teams: **Apps** (barra lateral) → pesquise **Workflows** → **Add** (Adicionar) ou **Open** (Abrir). Sem ele, o envio de cartões falha. |
 | Host Linux com o GitHub Copilot Agent Host rodando | `$ code agent host --help` responde e a sessão abre no VS Code. |
-| .NET SDK 10 no host (dispensável se for usar container) | `$ dotnet --list-sdks` mostra uma versão `10.x`. Para container, veja a [seção 10](#10-rodar-em-container-podman-ou-docker-rootless). |
+| **Binário:** .NET SDK 10 no host | `$ dotnet --list-sdks` mostra uma versão `10.x`. |
+| **Container:** Podman 4.4 ou mais recente, rootless (dispensa o .NET SDK) | `$ podman --version` e `$ podman info --format '{{.Host.Security.Rootless}}'` responde `true`. |
 | `git`, `curl`, `openssl` e `python3` no host | `$ git --version && curl --version && openssl version && python3 --version` |
 
 Se a sua empresa restringe conectores do Power Automate (políticas de DLP), confirme com o administrador que **Microsoft Teams** e **Request/Response** podem ser usados no mesmo fluxo.
@@ -221,6 +224,16 @@ $ dotnet publish src/CopilotTeamsBridge.Worker -c Release -o ~/apps/copilot-team
 
 O executável publicado fica em `~/apps/copilot-teams-bridge/copilot-teams-bridge.dll`.
 
+> **Em container:** clone o repositório da mesma forma, mas troque `dotnet test` e `dotnet publish` pelo build da imagem. Os testes não rodam no build da imagem; se quiser executá-los, use um host com .NET SDK.
+>
+> ```bash
+> $ git clone https://github.com/lzocateli/CopilotTeamsBridge.git ~/src/CopilotTeamsBridge
+> $ cd ~/src/CopilotTeamsBridge
+> $ podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
+> ```
+>
+> Detalhes na [seção 10.2](#102-construir-a-imagem).
+
 ### 4.2 Criar o diretório de segredos
 
 ```bash
@@ -231,6 +244,8 @@ $ chmod 600 ~/.config/copilot-teams-bridge/*
 ```
 
 O worker se recusa a ler arquivos de segredo que o grupo ou outros usuários possam ler.
+
+> **Em container:** este diretório é o mesmo. Ele é montado somente leitura em `/secrets`, e o container roda com o seu UID para conseguir ler os arquivos `600` ([seção 10.4](#usuário-do-processo-no-container)).
 
 ---
 
@@ -285,6 +300,8 @@ EOF
 
 Repita esse passo sempre que o Agent Host reiniciar.
 
+> **Em container:** prefira a [seção 5.2](#52-opção-recomendada-porta-e-token-fixos). A porta fica gravada no comando `podman run` e na unit Quadlet (`Network=pasta:-T,<porta>`); com porta variável, esses dois pontos teriam de ser editados a cada reinício do Agent Host. O token é relido do arquivo montado a cada reconexão, então basta repetir o script acima.
+
 ### 5.4 Canal do chat
 
 O `ChatChannel` identifica a conversa do Copilot que o worker vai acompanhar. Para descobri-lo, rode o worker no modo `--list-chats`. Ele conecta ao Agent Host com o endpoint e o token das seções anteriores, lista as sessões mais recentes (até 20) com seus chats e termina. Nada é enviado ao Teams, e o webhook, a chave de correlação e o `ChatChannel` não precisam estar configurados.
@@ -317,6 +334,17 @@ Como escolher:
 
 Se o endpoint e o token já estiverem em `appsettings.Local.json`, basta `dotnet copilot-teams-bridge.dll --list-chats`.
 
+> **Em container:** o mesmo modo, pela imagem. O token vem de `/secrets/agent-host.token` automaticamente; só a porta é informada:
+>
+> ```bash
+> $ PORTA=<porta>; CFG=~/.config/copilot-teams-bridge
+> $ podman run --rm --network=pasta:-T,$PORTA --userns=keep-id:uid=1654,gid=1654 \
+>     --read-only --cap-drop=all --security-opt=no-new-privileges \
+>     -v $CFG:/secrets:ro,Z \
+>     localhost/copilot-teams-bridge:latest --list-chats \
+>     --TeamsBridge:AgentHost:Endpoint=ws://127.0.0.1:$PORTA/
+> ```
+
 | Código de saída | Significado |
 |-----------------|-------------|
 | `0` | Chats listados. |
@@ -330,6 +358,8 @@ Se o endpoint e o token já estiverem em `appsettings.Local.json`, basta `dotnet
 ## 6. Configurar o worker
 
 Crie `~/apps/copilot-teams-bridge/appsettings.Local.json`, no mesmo diretório do binário publicado, com permissão `600`. **É aqui que fica a URL do webhook.**
+
+> **Em container:** o arquivo fica em `~/.config/copilot-teams-bridge/appsettings.Local.json`, sem `CorrelationKeyFile` nem `AgentHost:TokenFile` (a imagem já aponta para `/secrets`) e com `BearerTokenFile` no caminho de dentro do container. Use o modelo da [seção 10.3](#103-preparar-segredos-e-configuração) no lugar do abaixo.
 
 ```bash
 $ umask 077
@@ -385,6 +415,8 @@ Com `"DryRun": true`:
 $ cd ~/apps/copilot-teams-bridge && dotnet copilot-teams-bridge.dll
 ```
 
+> **Em container:** rode o comando `podman run` da [seção 10.4](#104-executar-manualmente) sem `--list-chats`, em primeiro plano. Se o serviço Quadlet já existir, pare-o antes (`systemctl --user stop copilot-teams-bridge.service`): dois workers no mesmo chat mandariam cartões em dobro.
+
 1. Abra a sessão do Copilot no VS Code e peça algo que exija confirmação, por exemplo uma tarefa que rode um comando no terminal.
 2. Nos logs do worker, espere ver:
    - `TeamsBridge iniciado (DryRun=True).`;
@@ -396,7 +428,7 @@ O que fica comprovado: o worker conecta ao Agent Host e recebe pedidos de um seg
 
 ### Etapa 2: envio sem resposta
 
-1. Troque para `"DryRun": false` e reinicie o worker.
+1. Troque para `"DryRun": false` e reinicie o worker. Em container, o arquivo é `~/.config/copilot-teams-bridge/appsettings.Local.json`; encerre com `Ctrl+C` e rode o `podman run` de novo (a configuração é lida só na partida).
 2. Gere uma nova confirmação no VS Code.
 3. O cartão deve aparecer no chat do Flow bot no Teams. **Não clique no Teams**: responda no VS Code.
 4. O worker não deve despachar nada; o pedido termina como `RuntimeRequestGone` ou `Expired`.
@@ -415,6 +447,8 @@ O que fica comprovado: o ciclo completo VS Code → Teams → mesma sessão.
 ---
 
 ## 8. Rodar como serviço
+
+> **Em container:** não use a unit desta seção. Use o **Quadlet** da [seção 10.5](#105-rodar-como-serviço-com-podman-quadlet), que gera o serviço systemd do container.
 
 Crie `~/.config/systemd/user/copilot-teams-bridge@.service`:
 
@@ -461,28 +495,26 @@ Use em `<id-do-chat>` o trecho depois de `ahp-chat:/` do URI escolhido na [seç�
 | Cartão não aparece no Teams | App Workflows não instalado, destinatário errado ou fluxo desligado | Confira os [pré-requisitos](#1-pré-requisitos), o campo **Recipient** e se o fluxo está **On** em **My flows**. |
 | Resultado `Forbidden` | Resposta de outra conta ou tenant | Confira `AllowedObjectId`/`AllowedTenantId` ([seção 3.3](#33-anotar-os-ids)). |
 | Resultado `Expired` ou `Duplicate` | Cartão respondido depois do prazo ou mais de uma vez | Ajuste `RequestTimeToLive` e o `Timeout` da [seção 2.3](#23-publicar-o-cartão-e-esperar-a-resposta), mantendo os dois iguais. |
-| Container: `Falha ao listar chats: Arquivo de secret ausente...` ou `Arquivo de secret ausente...` | O UID do processo no container não é o dono dos arquivos montados | Podman: use `--userns=keep-id:uid=1654,gid=1654`. Docker rootless: use `--user 0:0` ([seção 10.4](#usuário-do-processo-no-container)). |
-| Container: `--list-chats` termina com `1`, mas fora do container funciona | O container não enxerga o loopback do host | Podman: confira a porta em `--network=pasta:-T,<porta>`. Docker rootless: veja a [seção 10.6](#106-docker-rootless). |
+| Container: `Falha ao listar chats: Arquivo de secret ausente...` ou `Arquivo de secret ausente...` | O UID do processo no container não é o dono dos arquivos montados | Use `--userns=keep-id:uid=1654,gid=1654` ([seção 10.4](#usuário-do-processo-no-container)). |
+| Container: `--list-chats` termina com `1`, mas fora do container funciona | A porta em `--network=pasta:-T,<porta>` não é a do Agent Host | Confira a porta (e se ela mudou após reinício do Agent Host, [seção 5.3](#53-alternativa-ler-do-registro-a-cada-início)). |
 | Container: `Permission denied` ao montar volume (RHEL/Fedora) | Rótulo SELinux | Mantenha o sufixo `:Z` nas montagens. |
+| Container: cartões em dobro no Teams | Worker em primeiro plano e serviço Quadlet rodando ao mesmo tempo | `systemctl --user stop copilot-teams-bridge.service` antes de testar manualmente. |
 | Erro ao salvar a ação **Response** | Resposta assíncrona indisponível nesse gatilho | Registre a mensagem: é uma das [limitações](../README.md#limitações-ainda-não-comprovadas) em validação. |
 
 ---
 
-## 10. Rodar em container (Podman ou Docker rootless)
+## 10. Rodar em container (Podman rootless)
 
-O repositório traz um [`Containerfile`](../Containerfile) que serve tanto ao Podman quanto ao Docker. A imagem roda o mesmo worker das seções anteriores, como **usuário sem privilégios**, e não guarda nenhum segredo nem configuração: tudo é montado na execução, somente leitura. Com container, o host não precisa do .NET SDK.
+O repositório traz um [`Containerfile`](../Containerfile) para Podman. A imagem roda o mesmo worker das seções anteriores, como **usuário sem privilégios**, e não guarda nenhum segredo nem configuração: tudo é montado na execução, somente leitura. Com container, o host não precisa do .NET SDK.
 
-As seções 2, 3, 5 e 7 continuam valendo. Só mudam a instalação (seção 4), o local da configuração (seção 6) e o serviço (seção 8).
+As seções 2, 3, 5 e 7 continuam valendo. Só mudam a instalação (seção 4), o local da configuração (seção 6) e o serviço (seção 8); cada uma delas tem um bloco **Em container** apontando para cá.
 
 ### 10.1 Pré-requisitos
 
 | Item | Como conferir |
 |------|---------------|
-| Podman 4.4 ou mais recente, em modo rootless (recomendado) | `$ podman info --format '{{.Host.Security.Rootless}}'` responde `true`. |
-| **ou** Docker Engine 29.5 ou mais recente, em modo rootless | `$ docker info --format '{{.SecurityOptions}}'` contém `name=rootless`. Versões anteriores: veja a [seção 10.6](#106-docker-rootless). |
+| Podman 4.4 ou mais recente, em modo rootless (Quadlet e `pasta`) | `$ podman info --format '{{.Host.Security.Rootless}}'` responde `true`. |
 | Agent Host com **porta e token fixos** | [Seção 5.2](#52-opção-recomendada-porta-e-token-fixos). Com porta variável, o comando do container teria de mudar a cada reinício. |
-
-> Os comandos abaixo usam `podman`. Para Docker rootless, troque por `docker` e siga as diferenças da [seção 10.6](#106-docker-rootless).
 
 ### 10.2 Construir a imagem
 
@@ -491,7 +523,7 @@ $ cd ~/src/CopilotTeamsBridge && git pull
 $ podman build -t localhost/copilot-teams-bridge:latest -f Containerfile .
 ```
 
-O build compila em modo Release dentro do container (`mcr.microsoft.com/dotnet/sdk:10.0`) e gera uma imagem final de cerca de 240 MB baseada em `mcr.microsoft.com/dotnet/aspnet:10.0`. O arquivo [`.dockerignore`](../.dockerignore) impede que `appsettings.Local.json`, `*.key`, `*.token` e `*.bearer` entrem no contexto de build.
+O build compila em modo Release dentro do container (`mcr.microsoft.com/dotnet/sdk:10.0`) e gera uma imagem final de cerca de 240 MB baseada em `mcr.microsoft.com/dotnet/aspnet:10.0`. O arquivo [`.containerignore`](../.containerignore) impede que `appsettings.Local.json`, `*.key`, `*.token` e `*.bearer` entrem no contexto de build.
 
 Para atualizar depois: `git pull`, repita o `build` e reinicie o serviço (seção 10.5).
 
@@ -572,10 +604,7 @@ Alternativa mais simples, com menos isolamento: `--network=host`. O container pa
 
 #### Usuário do processo no container
 
-O worker recusa segredos legíveis por grupo ou outros (`600`). Dentro do container, o arquivo continua pertencendo ao **seu** usuário, então o processo precisa rodar com esse mesmo UID:
-
-- **Podman rootless:** `--userns=keep-id:uid=1654,gid=1654` mapeia o seu UID do host para o usuário `app` (1654) da imagem. O processo roda como `app` no container e como você no host.
-- **Docker rootless:** não há `keep-id`. O seu UID do host aparece como `root` (0) no container, então use `--user 0:0`. Isso **não** dá privilégio no host: o "root" do container rootless é o seu usuário comum.
+O worker recusa segredos legíveis por grupo ou outros (`600`). Dentro do container, o arquivo continua pertencendo ao **seu** usuário, então o processo precisa rodar com esse mesmo UID. `--userns=keep-id:uid=1654,gid=1654` mapeia o seu UID do host para o usuário `app` (1654) da imagem: o processo roda como `app` no container e como você no host, sem nenhum privilégio extra.
 
 Sem isso, o processo roda com outro UID, não consegue ler os arquivos e termina com `Arquivo de secret ausente ou com caminho relativo`.
 
@@ -624,28 +653,7 @@ Observações:
 - **Vários chats:** crie um arquivo `.container` por chat (por exemplo `copilot-teams-bridge-projetoX.container`), cada um com seu `ContainerName` e um `appsettings.Local.json` próprio montado em `/app/appsettings.Local.json`. Também dá para manter um único arquivo de configuração e passar o canal com `Exec=--TeamsBridge:AgentHost:ChatChannel=ahp-chat:/<id>`.
 - Depois de reconstruir a imagem (seção 10.2), rode `systemctl --user restart copilot-teams-bridge.service`.
 
-### 10.6 Docker rootless
-
-O comando é o mesmo da seção 10.4, com três diferenças:
-
-```bash
-$ docker run -d --name copilot-teams-bridge --restart unless-stopped \
-    --network=host \
-    --user 0:0 \
-    --read-only --cap-drop=all --security-opt=no-new-privileges \
-    -v $CFG:/secrets:ro,Z \
-    -v $CFG/appsettings.Local.json:/app/appsettings.Local.json:ro,Z \
-    localhost/copilot-teams-bridge:latest
-$ docker logs -f copilot-teams-bridge
-```
-
-1. **Rede:** Docker não tem o `pasta:-T` do Podman. Use `--network=host`. Até o Docker Engine 29.4, no modo rootless, `--network=host` usava a rede interna do RootlessKit, e não a do host: o worker não alcança o Agent Host em `127.0.0.1` e o `--list-chats` termina com código `1`. Nesse caso, atualize o Docker ou use Podman. **Não** troque o endpoint por um IP que não seja de loopback: o worker recusa, porque o token do Agent Host vai na URL da conexão.
-2. **Usuário:** `--user 0:0`, como explicado em [Usuário do processo no container](#usuário-do-processo-no-container).
-3. **Serviço:** `--restart unless-stopped` religa o container quando o daemon do Docker rootless sobe. Para isso, o daemon precisa iniciar com o usuário: `systemctl --user enable docker` e `loginctl enable-linger "$USER"`.
-
-Antes de deixar o container em segundo plano, confira a conectividade com `docker run --rm ... localhost/copilot-teams-bridge:latest --list-chats` (mesmas opções, sem `-d`, `--name` e `--restart`).
-
-> **Validação:** a imagem e todos os comandos desta seção foram testados com **Podman 5.8 rootless** (rede `pasta` e `host`, `keep-id`, `--user 0:0`, Quadlet). O Docker rootless não foi testado diretamente; o `--user 0:0` foi verificado no Podman, que usa o mesmo mapeamento de UID do Docker rootless.
+> **Validação:** a imagem e os comandos desta seção foram testados com **Podman 5.8 rootless** no RHEL 9 (rede `pasta` e `host`, `keep-id`, SELinux, Quadlet).
 
 ---
 

@@ -1,4 +1,4 @@
-# Lido por Docker e Podman. Nunca envie segredos ou configuração local ao contexto de build.
+# Lido pelo Podman (podman build). Nunca envie segredos ou configuração local ao contexto de build.
 .git/
 .vs/
 .idea/
