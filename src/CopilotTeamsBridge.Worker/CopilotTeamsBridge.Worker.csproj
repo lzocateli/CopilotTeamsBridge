@@ -16,7 +16,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <Content Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
-        <Content Update="appsettings.Local.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('appsettings.Local.json')" />
+        <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+        <None Update="appsettings.Local.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
     </ItemGroup>
 </Project>
